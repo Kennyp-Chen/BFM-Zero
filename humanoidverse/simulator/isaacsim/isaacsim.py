@@ -2,6 +2,11 @@ import sys
 import os
 from loguru import logger
 import torch
+
+# Fix numpy circular import issue with Isaac Sim
+# Ensure conda environment numpy takes priority over Isaac Sim's bundled numpy
+os.environ['NUMPY_EXPERIMENTAL_ARRAY_FUNCTION'] = '0'
+
 from humanoidverse.utils.torch_utils import to_torch, torch_rand_float
 import numpy as np
 from typing import Optional
@@ -441,8 +446,15 @@ class IsaacSim(BaseSimulator):
         
     def setup_keyboard(self):
         # TODO: add back
-        from isaaclab.devices.keyboard.se2_keyboard import Se2Keyboard
-        self.keyboard_interface = Se2Keyboard()
+        from isaaclab.devices.keyboard.se2_keyboard import Se2Keyboard, Se2KeyboardCfg
+        # Create a minimal config for Se2Keyboard
+        keyboard_cfg = Se2KeyboardCfg(
+            v_x_sensitivity=0.8,
+            v_y_sensitivity=0.4,
+            omega_z_sensitivity=1.0,
+            sim_device=self.sim_device
+        )
+        self.keyboard_interface = Se2Keyboard(keyboard_cfg)
         
     def add_keyboard_callback(self, key, callback):
         # TODO: add back

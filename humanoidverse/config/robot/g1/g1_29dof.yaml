@@ -273,7 +273,8 @@ robot:
 
     urdf_file: "g1/${robot.asset.robot_type}.urdf"
     # usd_file: "g1/${robot.asset.robot_type}.usd"
-    usd_file: "g1/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd"
+    usd_file: "/home/hero/Projects/Robotics/RL/Unitree_Assets/g1_29dof/usd/g1_29dof_rev_1_0"
+        usd_file: "g1/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd"
     xml_file: "g1/${robot.asset.robot_type}.xml"
     robot_type: g1_29dof_fakehand
     self_collisions: 0 # 1 to disable, 0 to enable self collisions
@@ -284,7 +285,7 @@ robot:
   motion:
     motion_file : 'data/lafan_29dof.pkl'
     asset:
-      assetRoot: "humanoidverse/data/robots/g1/"
+      assetRoot: "/home/hero/Projects/Robotics/RL/Unitree_Assets/g1_29dof/"
       assetFileName: "g1_29dof.xml"
       urdfFileName: "g1_29dof_fakehand.urdf"
 

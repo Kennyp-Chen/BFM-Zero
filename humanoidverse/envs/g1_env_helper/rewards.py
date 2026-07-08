@@ -523,8 +523,12 @@ class ArmsReward(RewardFunction):
         left_limits = REWARD_LIMITS[self.left_pose]
         right_limits = REWARD_LIMITS[self.right_pose]
         center_of_mass_velocity = get_center_of_mass_linvel(model, data)
-        left_height = data.body("left_wrist_roll_link").xpos[-1]
-        right_height = data.body("right_wrist_roll_link").xpos[-1]
+        if model.nv == 23 + 6:
+            left_height = data.body("left_wrist_roll_rubber_hand").xpos[-1]
+            right_height = data.body("right_wrist_roll_rubber_hand").xpos[-1]
+        else:
+            left_height = data.body("left_wrist_roll_link").xpos[-1]
+            right_height = data.body("right_wrist_roll_link").xpos[-1]
         standing = rewards.tolerance(
             root_height,
             bounds=(self.stand_height, float("inf")),
@@ -673,8 +677,12 @@ class ToTheKnee(RewardFunction):
         left_limits = [0, 0.4, 0.2]
         right_limits = [0, 0.4, 0.2]
         center_of_mass_velocity = get_center_of_mass_linvel(model, data)
-        left_height = data.body("left_wrist_roll_link").xpos[-1]
-        right_height = data.body("right_wrist_roll_link").xpos[-1]
+        if model.nv == 23 + 6:
+            left_height = data.body("left_wrist_roll_rubber_hand").xpos[-1]
+            right_height = data.body("right_wrist_roll_rubber_hand").xpos[-1]
+        else:
+            left_height = data.body("left_wrist_roll_link").xpos[-1]
+            right_height = data.body("right_wrist_roll_link").xpos[-1]
         standing = rewards.tolerance(
             root_height,
             bounds=(self.stand_height, float("inf")),
@@ -846,8 +854,12 @@ class MoveArmsReward(RewardFunction):
         # ARM POSES
         left_limits = REWARD_LIMITS[self.left_pose]
         right_limits = REWARD_LIMITS[self.right_pose]
-        left_height = data.body("left_wrist_roll_link").xpos[-1]
-        right_height = data.body("right_wrist_roll_link").xpos[-1]
+        if model.nv == 23 + 6:
+            left_height = data.body("left_wrist_roll_rubber_hand").xpos[-1]
+            right_height = data.body("right_wrist_roll_rubber_hand").xpos[-1]
+        else:
+            left_height = data.body("left_wrist_roll_link").xpos[-1]
+            right_height = data.body("right_wrist_roll_link").xpos[-1]
         left_arm = rewards.tolerance(
             left_height,
             bounds=(left_limits[0], left_limits[1]),
@@ -967,8 +979,12 @@ class SpinArmsReward(RewardFunction):
         # ARM POSES
         left_limits = REWARD_LIMITS[self.left_pose]
         right_limits = REWARD_LIMITS[self.right_pose]
-        left_height = data.body("left_wrist_roll_link").xpos[-1]
-        right_height = data.body("right_wrist_roll_link").xpos[-1]
+        if model.nv == 23 + 6:
+            left_height = data.body("left_wrist_roll_rubber_hand").xpos[-1]
+            right_height = data.body("right_wrist_roll_rubber_hand").xpos[-1]
+        else:
+            left_height = data.body("left_wrist_roll_link").xpos[-1]
+            right_height = data.body("right_wrist_roll_link").xpos[-1]
         left_arm = rewards.tolerance(
             left_height,
             bounds=(left_limits[0], left_limits[1]),

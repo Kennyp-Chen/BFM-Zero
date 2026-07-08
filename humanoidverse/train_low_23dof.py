@@ -3,7 +3,27 @@
 # This source code is licensed under the CC BY-NC 4.0 license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+显存优化配置修改内容：
+
+🔴 高影响参数：
+# - online_parallel_envs: 1024 并行环境数量)
+- buffer_size: 5120000 → 2560000 (减少缓冲区大小)
+
+🟡 中等影响参数：
+- hidden_dim: f (减少网络隐藏层维度)
+- hidden_layers: 6 → 4 (减少网络层数) 4->2
+
+🟢 低影响参数：
+- batch_size: 1024 → 512 (减少训练批次大小)
+- inference_batch_size: 500000 → 256000 (减少推理批次大小)
+
+"""
+
+
+
 import os
+import argparse
 
 from humanoidverse.agents.evaluations.humanoidverse_isaac import (
     HumanoidVerseIsaacTrackingEvaluation,
@@ -14,6 +34,7 @@ from humanoidverse.agents.envs.humanoidverse_isaac import load_expert_trajectori
 os.environ["OMP_NUM_THREADS"] = "1"
 
 import torch
+import safetensors.torch
 
 torch.set_float32_matmul_precision("high")
 
@@ -35,6 +56,7 @@ import wandb
 from packaging.version import Version
 from torch.utils._pytree import tree_map
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter  # 添加TensorBoard支持
 
 
 from humanoidverse.agents.base import BaseConfig
@@ -90,8 +112,9 @@ class TrainConfig(BaseConfig):
     num_seed_steps: int = 50_000
     num_agent_updates: int = 50
     # Note: this is in env steps (multiples of online_parallel_envs)
-    checkpoint_every_steps: int = 5_000_000
+    checkpoint_every_steps: int = 2_500_000 # origin 5_000_000
     checkpoint_buffer: bool = True
+    save_all_checkpoints: bool = False  # 是否保存所有检查点（关闭时覆盖，开启时保存为mode_{checkpoint_every_steps}l.safetensors）
     prioritization: bool = False
     prioritization_min_val: float = 0.5
     prioritization_max_val: float = 5
@@ -110,9 +133,13 @@ class TrainConfig(BaseConfig):
     wandb_gname: str | None = None
     wandb_pname: str | None = None
 
+    # TensorBoard
+    use_tensorboard: bool = False
+    tensorboard_log_dir: str = "tensorboard_logs"
+
     # misc
     load_isaac_expert_data: bool = True
-    buffer_device: str = "cpu"
+    buffer_device: str = "cuda"  # 使用CUDA存储缓冲区 
     # Default to True; otherwise you will spam the console with tqdm
     disable_tqdm: bool = True
 
@@ -127,6 +154,10 @@ class TrainConfig(BaseConfig):
     infra: tp.ClassVar[xk.TaskInfra] = xk.TaskInfra(version="1")
 
     def model_post_init(self, context):
+        # 训练配置的合法性检查会在这里触发：
+        # - 是否提供了 expert 数据（motions/motions_root）
+        # - 是否开启了 prioritization 但没有 tracking eval
+        # - evaluations 的 name_in_logs 是否重复
         # TODO prioritization needs tracking eval to work, but this is bit hacky to check for it
         if self.load_isaac_expert_data and not isinstance(self.env, HumanoidVerseIsaacConfig):
             raise ValueError("Loading expert isaac data is only supported for HumanoidVerseIsaacConfig")
@@ -164,6 +195,10 @@ class TrainConfig(BaseConfig):
 
 
 def create_agent_or_load_checkpoint(work_dir: Path, cfg: TrainConfig, agent_build_kwargs: dict[str, tp.Any]):
+    # 如果 work_dir/checkpoint 存在：
+    # - 从 checkpoint 中恢复 agent 参数（以及 train_status 里的 time）
+    # 否则：
+    # - 用 cfg.agent.build(...) 从头构建 agent
     checkpoint_dir = work_dir / CHECKPOINT_DIR_NAME
     checkpoint_time = 0
     if checkpoint_dir.exists():
@@ -189,8 +224,8 @@ class Workspace:
     def __init__(self, cfg: TrainConfig) -> None:
         self.cfg = cfg
 
-        # HACK with Isaac, we can not recreate environments with current code, so we need to
-        #      create the environment with desired number of envs here
+        # Isaac 环境的一个限制：当前代码路径下“重新创建 env”不够稳定/不被支持，
+        # 所以这里直接按 online_parallel_envs 创建训练环境，并缓存到 self.train_env。
         if isinstance(cfg.env, HumanoidVerseIsaacConfig):
             from omegaconf import OmegaConf
 
@@ -202,10 +237,10 @@ class Workspace:
             self.obs_space = sample_env.observation_space
             self.action_space = sample_env.action_space
 
+        # 约定：obs 字典里必须有 `time`（来自 TimeAwareObservation wrapper），用于 step_count / 序列相关逻辑。
         assert "time" in self.obs_space.keys(), "Observation space must contain 'obs' and 'time' (TimeAwareObservation wrapper)"
         assert len(self.action_space.shape) == 1, "Only 1D action space is supported (first dim should be vector env)"
-        # TODO for backwards consistency, we do not pass "time" to the agent, so we remove it from the obs_space we pass to the agent/model
-        #      but would we need it at some point?
+        # 兼容历史代码：agent 不消费 `time` 这个观测键，所以从传给 agent 的 obs_space 里删掉。
         del self.obs_space.spaces["time"]
 
         self.action_dim = self.action_space.shape[0]
@@ -222,6 +257,7 @@ class Workspace:
 
         set_seed_everywhere(self.cfg.seed)
 
+        # 构建/恢复 agent：内部会根据 checkpoint 是否存在决定 load 还是 build。
         self.agent, self.cfg, self._checkpoint_time = create_agent_or_load_checkpoint(
             self.work_dir, self.cfg, agent_build_kwargs=dict(obs_space=self.obs_space, action_dim=self.action_dim)
         )
@@ -237,6 +273,14 @@ class Workspace:
 
         if self.cfg.use_wandb:
             init_wandb(self.cfg)
+
+        # 初始化TensorBoard writer
+        self.tb_writer = None
+        if self.cfg.use_tensorboard:
+            tb_log_path = self.work_dir / self.cfg.tensorboard_log_dir
+            tb_log_path.mkdir(exist_ok=True, parents=True)
+            self.tb_writer = SummaryWriter(log_dir=str(tb_log_path))
+            print(f"TensorBoard logs will be saved to: {tb_log_path}")
 
         with (self.work_dir / "config.json").open("w") as f:
             f.write(self.cfg.model_dump_json(indent=4))
@@ -259,6 +303,9 @@ class Workspace:
         self.train_online()
 
     def train_online(self) -> None:
+        # 训练数据来源分两部分：
+        # - online rollout 产生的 (s,a,r,s') 写入 replay_buffer["train"]
+        # - expert trajectories（用于 imitation / relabel / 采样 context 等）写入 replay_buffer["expert_slicer"]
         if self.training_with_expert_data:
             if self.cfg.load_isaac_expert_data:
                 expert_buffer = load_expert_trajectories_from_motion_lib(self.train_env._env, self.cfg.agent, device=self.cfg.buffer_device)
@@ -281,6 +328,9 @@ class Workspace:
         else:
             train_env, train_env_info = self.cfg.env.build(num_envs=self.cfg.online_parallel_envs)
 
+        # replay_buffer 可能包含：
+        # - train: 训练用的 online buffer（DictBuffer 或 TrajectoryDictBufferMultiDim）
+        # - expert_slicer: 专家轨迹 buffer（用于采样 expert z / 评估 / prioritization 等）
         print("Allocating buffers")
         replay_buffer = {}
         checkpoint_dir = self.work_dir / CHECKPOINT_DIR_NAME
@@ -332,6 +382,8 @@ class Workspace:
             eval_instances.append(isinstance(evaluation, HumanoidVerseIsaacTrackingEvaluation))
         uses_humanoidverse_eval = True if any(eval_instances) else False
 
+        # 主循环的时间单位是“环境步数 env steps”，且每次迭代推进 online_parallel_envs 个 step：
+        # t = 0, N, 2N, ... 其中 N = online_parallel_envs
         for t in range(self._checkpoint_time, self.cfg.num_env_steps + self.cfg.online_parallel_envs, self.cfg.online_parallel_envs):
             if (t != self._checkpoint_time) and checkpoint_time_checker.check(t):
                 checkpoint_time_checker.update_last_step(t)
@@ -394,8 +446,9 @@ class Workspace:
                     )
 
             with torch.no_grad():
+                # 1) 把 env 返回的 numpy obs 转成 torch，并放到 agent.device 上（通常是 cuda）
                 obs = tree_map(lambda x: torch.tensor(x, dtype=dtype_numpytotorch_lower_precision(x.dtype), device=self.agent.device), td)
-                # TODO consistency with obs_space: remove time assigned by TimeAwareObservationWrapper
+                # 2) `time` 在这里被当成 step_count 使用（同时也从 obs dict 移除，避免进入 agent 网络）
                 step_count = obs.pop("time")
 
                 history_context = None
@@ -410,8 +463,10 @@ class Workspace:
 
                 context = self.agent.maybe_update_rollout_context(z=context, step_count=step_count, replay_buffer=replay_buffer)
                 if t < self.cfg.num_seed_steps:
+                    # 冷启动阶段：先用随机动作把 buffer 填起来
                     action = train_env.action_space.sample().astype(np.float32)
                 else:
+                    # 正式训练阶段：agent 根据 obs 与 rollout context 产生动作
                     # this works in inference mode
                     if history_context is not None:
                         action = self.agent.act(obs=obs, z=context, context=history_context, mean=False)
@@ -490,8 +545,10 @@ class Workspace:
                         }
             else:
                 raise NotImplementedError("still some work to do for gymnasium < 1.0")
+            # 3) 写入 online replay buffer
             replay_buffer["train"].extend(data)
 
+            # 4) 按 update_agent_every 的频率做参数更新（每次更新做 num_agent_updates 个 gradient steps）
             if len(replay_buffer["train"]) > 0 and t > self.cfg.num_seed_steps and update_agent_time_checker.check(t):
                 update_agent_time_checker.update_last_step(t)
                 for _ in range(self.cfg.num_agent_updates):
@@ -511,6 +568,14 @@ class Workspace:
                     m_dict[k] = np.round(tmp.mean().item(), 6)
                 m_dict["duration [minutes]"] = (time.time() - start_time) / 60
                 m_dict["FPS"] = (1 if t == 0 else self.cfg.log_every_updates) / (time.time() - fps_start_time)
+                
+                # 写入TensorBoard
+                if self.cfg.use_tensorboard and self.tb_writer is not None:
+                    for k, v in m_dict.items():
+                        if isinstance(v, (int, float)):
+                            self.tb_writer.add_scalar(f"train/{k}", v, t)
+                    self.tb_writer.flush()
+                
                 if self.cfg.use_wandb:
                     wandb.log(
                         {f"train/{k}": v for k, v in m_dict.items()},
@@ -529,8 +594,15 @@ class Workspace:
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
         train_env.close()
+        
+        # 关闭TensorBoard writer
+        if self.cfg.use_tensorboard and self.tb_writer is not None:
+            self.tb_writer.close()
+            print("TensorBoard writer closed")
 
     def eval(self, t, replay_buffer):
+        # eval 会短暂把 agent 切到 eval 模式，并运行 evaluation.run(...)。
+        # 对 Isaac 环境：evaluation 可能复用 train_env，因此 eval 后会 reset（见 train_online 里 uses_humanoidverse_eval 分支）。
         print(f"Starting evaluation at time {t}")
         evaluation_results = {}
 
@@ -563,6 +635,13 @@ class Workspace:
                     {f"eval/{evaluation_name}/{k}": v for k, v in wandb_dict.items()},
                     step=t,
                 )
+            
+            # 写入TensorBoard评估指标
+            if self.cfg.use_tensorboard and self.tb_writer is not None and evaluation_metrics is not None:
+                for metric_name, metric_value in evaluation_metrics.items():
+                    if isinstance(metric_value, (int, float)):
+                        self.tb_writer.add_scalar(f"eval/{evaluation_name}/{metric_name}", metric_value, t)
+                self.tb_writer.flush()
 
             evaluation_results[evaluation_name] = evaluation_metrics
 
@@ -576,15 +655,29 @@ class Workspace:
         return evaluation_results
 
     def save(self, time: int, replay_buffer: Dict[str, tp.Any]) -> None:
+        # 保存内容：
+        # - agent 参数（self.agent.save）
+        # - 可选：train buffer（用于断点续训）
+        # - train_status.json（记录已训练到的 time）
         print(f"Checkpointing at time {time}")
-        self.agent.save(str(self.work_dir / CHECKPOINT_DIR_NAME))
+
+        # 默认行为：覆盖保存到 checkpoint 目录（始终保存最新）
+        checkpoint_dir = self.work_dir / CHECKPOINT_DIR_NAME
+        self.agent.save(str(checkpoint_dir))
         if self.cfg.checkpoint_buffer:
-            replay_buffer["train"].save(self.work_dir / CHECKPOINT_DIR_NAME / "buffers" / "train")
-        with (self.work_dir / CHECKPOINT_DIR_NAME / "train_status.json").open("w+") as f:
+            replay_buffer["train"].save(checkpoint_dir / "buffers" / "train")
+        with (checkpoint_dir / "train_status.json").open("w+") as f:
             json.dump({"time": time}, f, indent=4)
 
+        if self.cfg.save_all_checkpoints:
+            # save_all_checkpoints: 仅额外保存每个时间点的 safetensors 快照
+            model_dir = checkpoint_dir / "model"
+            model_dir.mkdir(exist_ok=True, parents=True)
+            model_file_path = model_dir / f"model_{time}.safetensors"
+            safetensors.torch.save_model(self.agent._model, model_file_path)
 
-def train_bfm_zero():
+
+def train_bfm_zero(headless: bool = True, save_all_checkpoints: bool = False, work_dir: str = None):
     from humanoidverse.agents.fb_cpr_aux.model import FBcprAuxModelArchiConfig, FBcprAuxModelConfig
     from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentTrainConfig
     from humanoidverse.agents.nn_models import ForwardArchiConfig, BackwardArchiConfig, ActorArchiConfig, DiscriminatorArchiConfig, RewardNormalizerConfig
@@ -600,14 +693,21 @@ def train_bfm_zero():
                 device='cuda',
                 archi=FBcprAuxModelArchiConfig(
                     name='FBcprAuxModelArchiConfig',
-                    z_dim=256,
+                    z_dim=256,  # 原始: 256，减少隐变量维度
                     norm_z=True,
-                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
                     b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=256, hidden_layers=1, norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=2048, hidden_layers=6, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
-                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
-                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=1024, hidden_layers=3, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
+                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=2048, hidden_layers=4, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
+                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=1024, hidden_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
+                    # f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    # b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=128, hidden_layers=1, norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    # actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=1024, hidden_layers=4, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
+                    # critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    # discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=512, hidden_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    # aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
+                
                 ),
                 obs_normalizer=ObsNormalizerConfig(
                     name='ObsNormalizerConfig',
@@ -619,8 +719,8 @@ def train_bfm_zero():
                     },
                     allow_mismatching_keys=True
                 ),
-                inference_batch_size=500000,
-                seq_length=8,
+                inference_batch_size=256000,  # 原始: 500000，减少推理批次大小
+                seq_length=8,  
                 actor_std=0.05,
                 amp=False,
                 norm_aux_reward=RewardNormalizerConfig(name='RewardNormalizer', translate=False, scale=True)
@@ -639,7 +739,7 @@ def train_bfm_zero():
                 actor_pessimism_penalty=0.5,
                 stddev_clip=0.3,
                 q_loss_coef=0.0,
-                batch_size=1024,
+                batch_size=512,  # 原始: 1024，减少训练批次大小，确保能被seq_length=6整除
                 discount=0.98,
                 use_mix_rollout=True,
                 update_z_every_step=100,
@@ -664,15 +764,16 @@ def train_bfm_zero():
             aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_ankle_roll', 'penalty_slippage'],
             aux_rewards_scaling={'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0},
             cudagraphs=False,
-            compile=True
+            compile=False,  
         ),
         motions='',
         motions_root='',
         env=HumanoidVerseIsaacConfig(
             name='humanoidverse_isaac',
             device='cuda:0',
-            # TODO this needs to be updated to point to a path with lafan dataset chunked into 10s clips
-            lafan_tail_path='humanoidverse/data/lafan_29dof_10s-clipped.pkl',
+            # lafan_tail_path='humanoidverse/data/lafan_29dof_10s-clipped.pkl',  # 使用29-DOF数据，23-DOF在训练时适配
+            lafan_tail_path='humanoidverse/data/lafan_23dof_10s-clipped.pkl',  # 使用29-DOF数据，23-DOF在训练时适配
+            
             enable_cameras=False,
             camera_render_save_dir='isaac_videos',
             max_episode_length_s=None,
@@ -680,7 +781,15 @@ def train_bfm_zero():
             disable_domain_randomization=False,
             relative_config_path='exp/bfm_zero/bfm_zero',
             include_last_action=True,
-            hydra_overrides=['robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
+            hydra_overrides=[
+                'robot=g1/g1_23dof_hard_waist',
+                'robot.control.action_scale=0.25',
+                'robot.control.action_clip_value=5.0',
+                'robot.control.normalize_action_to=5.0',
+                f'env.config.headless={headless}',
+                'env.config.lie_down_init=True',
+                'env.config.lie_down_init_prob=0.3'
+            ],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,
@@ -689,32 +798,38 @@ def train_bfm_zero():
             make_config_g1env_compatible=False,
             root_height_obs=True
         ),
-        work_dir='results/bfmzero-isaac',
+        work_dir=work_dir if work_dir is not None else (
+            f'results/23dof-bfmzero-isaac-low/{time.strftime("%Y%m%d_%H%M%S")}'
+        ),
+        # work_dir="results/23dof-bfmzero-isaac-low/test/26"
         seed=4728,
-        online_parallel_envs=1024,
-        log_every_updates=384000,
-        num_env_steps=384000000,
+        online_parallel_envs=1024,  # TODO 1024
+        log_every_updates=384000,# 384000
+        num_env_steps=384000000,# 384000000
         update_agent_every=1024,
         num_seed_steps=10240,
         num_agent_updates=16,
-        checkpoint_every_steps=9600000,
+        checkpoint_every_steps=19200000,# 9600000 ,
         checkpoint_buffer=True,
+        save_all_checkpoints=save_all_checkpoints,  # 使用命令行参数
         prioritization=True,
         prioritization_min_val=0.5,
         prioritization_max_val=2.0,
         prioritization_scale=2.0,
         prioritization_mode='exp',
         use_trajectory_buffer=True,
-        buffer_size=5120000,
+        buffer_size=2560000,  # 原始: 5120000，减少缓冲区大小
         use_wandb=False,
+        use_tensorboard=True,  # 启用TensorBoard
+        tensorboard_log_dir='tensorboard_logs',  # TensorBoard日志目录
         wandb_ename='yitangl',  # your wandb entity (username/team), empty = default from wandb login
         wandb_gname='bfmzero-isaac',  # run group
-        wandb_pname='bfmzero-isaac',  # your wandb project name
+        wandb_pname='23dof-bfmzero-isaac',  # 23-DOF项目名称
         load_isaac_expert_data=True,
-        buffer_device='cuda',
+        buffer_device='cuda',  # 使用CUDA存储缓冲区
         disable_tqdm=True,
         evaluations=[HumanoidVerseIsaacTrackingEvaluationConfig(name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos', video_name_prefix='unknown_agent', name_in_logs='humanoidverse_tracking_eval', env=None, num_envs=1024, n_episodes_per_motion=1)],
-        eval_every_steps=9600000,
+        eval_every_steps=9600000,  # 23-DOF:
         tags={},
     )
     workspace = cfg.build()
@@ -722,8 +837,36 @@ def train_bfm_zero():
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Train BFM-Zero humanoid agent"
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run training in headless mode (no GUI)"
+    )
+    parser.add_argument(
+        "--save_all_checkpoints",
+        action="store_true",
+        default=False,
+        help=f"Save all checkpoints (saves model_{time}.safetensors in checkpoint/model directory)"
+    )
+    parser.add_argument(
+        "--workdir",
+        type=str,
+        default=None,
+        help="Specify the working directory to resume training from"
+    )
+    args = parser.parse_args()
+
     # This is the bare minimum CLI interface to launch experiments, but ideally you should
     # launch your experiments from Python code (e.g., see under "scripts")
-    train_bfm_zero()
+    train_bfm_zero(
+        headless=args.headless, 
+        save_all_checkpoints=args.save_all_checkpoints,
+        work_dir=args.workdir
+    )
 
 # uv run --no-cache -m humanoidverse.meta_online_entry_point

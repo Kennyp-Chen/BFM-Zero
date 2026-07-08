@@ -36,14 +36,17 @@ class StateInit(Enum):
     MoCapAndFall = 4
 
 
-# Single scene for all tasks (no separate terrain XMLs).
-_SCENE_XML = "scene_29dof_freebase_mujoco.xml"
+# Scene XMLs
+_SCENE_XML_29 = "scene_29dof_freebase_mujoco.xml"
+_SCENE_XML_23 = "scene_23dof_freebase_mujoco.xml"
 
 
 def task_to_xml(task_name: str) -> Path:
-    """Resolve task name to the single G1 scene XML path (package data dir)."""
+    """Resolve task name to the G1 scene XML path."""
     root = get_g1_robot_xml_root()
-    return root / _SCENE_XML
+    if "23dof" in task_name:
+        return root / _SCENE_XML_23
+    return root / _SCENE_XML_29
 
 
 class G1Env(G1Base):
@@ -129,13 +132,12 @@ class G1Env(G1Base):
         if seed is not None:
             self.seed = seed
         if options:
-            # Only 29-DOF (36-D qpos: 7 free + 29 joints) is supported; no 23-DOF.
+            # Support dynamic DOF based on model NQ.
             if "qpos" in options:
                 q = np.asarray(options["qpos"]).ravel()
                 if q.size != self._mj_model.nq:
                     raise ValueError(
-                        f"qpos size {q.size} does not match model nq {self._mj_model.nq}. "
-                        "Only 36-D qpos (7 free + 29 joints) is supported."
+                        f"qpos size {q.size} does not match model nq {self._mj_model.nq}."
                     )
             self._mj_data = init(self._mj_model, **options)
         else:

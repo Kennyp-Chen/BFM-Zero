@@ -1,0 +1,29 @@
+# Training artifacts
+results/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Inference output videos
+model_inference_tracked*.mp4
+model/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Wandb
+wandb/

@@ -3,7 +3,32 @@
 # This source code is licensed under the CC BY-NC 4.0 license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+显存优化配置修改内容：
+
+🔴 高影响参数：
+- online_parallel_envs: 1024 → 512 (减少并行环境数量)
+- buffer_size: 5120000 → 2560000 (减少缓冲区大小)
+
+
+🟡 中等影响参数：
+- z_dim: 256 → 128 (减少隐变量维度)
+- hidden_dim: 2048 → 1024 (减少网络隐藏层维度)
+- hidden_layers: 6 → 4 (减少网络层数)
+- num_parallel: 2
+
+🟢 低影响参数：
+- batch_size: 1024 → 512 (减少训练批次大小) → 504(512 ÷ 6 = 85.33... 不能整除。)
+- inference_batch_size: 500000 → 256000 (减少推理批次大小)
+- seq_length: 8 → 6 (减少序列长度)
+
+预期显存节省效果：约60-70%
+"""
+
+
+
 import os
+import argparse
 
 from humanoidverse.agents.evaluations.humanoidverse_isaac import (
     HumanoidVerseIsaacTrackingEvaluation,
@@ -33,8 +58,8 @@ import torch  # better to use scoped import if we use processes
 import tyro
 import wandb
 from packaging.version import Version
-from torch.utils._pytree import tree_map
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter  # 添加TensorBoard支持
 
 
 from humanoidverse.agents.base import BaseConfig
@@ -110,9 +135,13 @@ class TrainConfig(BaseConfig):
     wandb_gname: str | None = None
     wandb_pname: str | None = None
 
+    # TensorBoard
+    use_tensorboard: bool = False
+    tensorboard_log_dir: str = "tensorboard_logs"
+
     # misc
     load_isaac_expert_data: bool = True
-    buffer_device: str = "cpu"
+    buffer_device: str = "cuda"  # 使用CUDA存储缓冲区 
     # Default to True; otherwise you will spam the console with tqdm
     disable_tqdm: bool = True
 
@@ -237,6 +266,14 @@ class Workspace:
 
         if self.cfg.use_wandb:
             init_wandb(self.cfg)
+
+        # 初始化TensorBoard writer
+        self.tb_writer = None
+        if self.cfg.use_tensorboard:
+            tb_log_path = self.work_dir / self.cfg.tensorboard_log_dir
+            tb_log_path.mkdir(exist_ok=True, parents=True)
+            self.tb_writer = SummaryWriter(log_dir=str(tb_log_path))
+            print(f"TensorBoard logs will be saved to: {tb_log_path}")
 
         with (self.work_dir / "config.json").open("w") as f:
             f.write(self.cfg.model_dump_json(indent=4))
@@ -511,6 +548,14 @@ class Workspace:
                     m_dict[k] = np.round(tmp.mean().item(), 6)
                 m_dict["duration [minutes]"] = (time.time() - start_time) / 60
                 m_dict["FPS"] = (1 if t == 0 else self.cfg.log_every_updates) / (time.time() - fps_start_time)
+
+                # 写入TensorBoard
+                if self.cfg.use_tensorboard and self.tb_writer is not None:
+                    for k, v in m_dict.items():
+                        if isinstance(v, (int, float)):
+                            self.tb_writer.add_scalar(f"train/{k}", v, t)
+                    self.tb_writer.flush()
+
                 if self.cfg.use_wandb:
                     wandb.log(
                         {f"train/{k}": v for k, v in m_dict.items()},
@@ -529,6 +574,11 @@ class Workspace:
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
         train_env.close()
+
+        # 关闭TensorBoard writer
+        if self.cfg.use_tensorboard and self.tb_writer is not None:
+            self.tb_writer.close()
+            print("TensorBoard writer closed")
 
     def eval(self, t, replay_buffer):
         print(f"Starting evaluation at time {t}")
@@ -560,9 +610,21 @@ class Workspace:
             # For wandb dict, put it on wandb
             if self.cfg.use_wandb and wandb_dict is not None:
                 wandb.log(
-                    {f"eval/{evaluation_name}/{k}": v for k, v in wandb_dict.items()},
+                    {f"eval/{evaluation_name}/{k}": v
+                     for k, v in wandb_dict.items()},
                     step=t,
                 )
+            
+            # 写入TensorBoard评估指标
+            if (self.cfg.use_tensorboard and self.tb_writer is not None
+                    and evaluation_metrics is not None):
+                for metric_name, metric_value in evaluation_metrics.items():
+                    if isinstance(metric_value, (int, float)):
+                        self.tb_writer.add_scalar(
+                            f"eval/{evaluation_name}/{metric_name}",
+                            metric_value, t
+                        )
+                self.tb_writer.flush()
 
             evaluation_results[evaluation_name] = evaluation_metrics
 
@@ -584,7 +646,8 @@ class Workspace:
             json.dump({"time": time}, f, indent=4)
 
 
-def train_bfm_zero():
+# def train_bfm_zero():
+def train_bfm_zero(headless: bool = True):
     from humanoidverse.agents.fb_cpr_aux.model import FBcprAuxModelArchiConfig, FBcprAuxModelConfig
     from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentTrainConfig
     from humanoidverse.agents.nn_models import ForwardArchiConfig, BackwardArchiConfig, ActorArchiConfig, DiscriminatorArchiConfig, RewardNormalizerConfig
@@ -600,14 +663,14 @@ def train_bfm_zero():
                 device='cuda',
                 archi=FBcprAuxModelArchiConfig(
                     name='FBcprAuxModelArchiConfig',
-                    z_dim=256,
+                    z_dim=128,  # 原始: 256，减少隐变量维度
                     norm_z=True,
-                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
-                    b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=256, hidden_layers=1, norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=2048, hidden_layers=6, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
-                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
-                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=1024, hidden_layers=3, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
-                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=2048, model='residual', hidden_layers=6, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
+                    f=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    b=BackwardArchiConfig(name='BackwardArchi', hidden_dim=128, hidden_layers=1, norm=True, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    actor=ActorArchiConfig(name='actor', model='residual', hidden_dim=1024, hidden_layers=4, embedding_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'last_action', 'history_actor'])),
+                    critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor'])),
+                    discriminator=DiscriminatorArchiConfig(name='DiscriminatorArchi', hidden_dim=512, hidden_layers=2, input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state'])),
+                    aux_critic=ForwardArchiConfig(name='ForwardArchi', hidden_dim=1024, model='residual', hidden_layers=4, embedding_layers=2, num_parallel=2, ensemble_mode='batch', input_filter=DictInputFilterConfig(name='DictInputFilterConfig', key=['state', 'privileged_state', 'last_action', 'history_actor']))
                 ),
                 obs_normalizer=ObsNormalizerConfig(
                     name='ObsNormalizerConfig',
@@ -619,8 +682,8 @@ def train_bfm_zero():
                     },
                     allow_mismatching_keys=True
                 ),
-                inference_batch_size=500000,
-                seq_length=8,
+                inference_batch_size=256000,  # 原始: 500000，减少推理批次大小
+                seq_length=6,  # 原始: 8，减少序列长度
                 actor_std=0.05,
                 amp=False,
                 norm_aux_reward=RewardNormalizerConfig(name='RewardNormalizer', translate=False, scale=True)
@@ -639,7 +702,7 @@ def train_bfm_zero():
                 actor_pessimism_penalty=0.5,
                 stddev_clip=0.3,
                 q_loss_coef=0.0,
-                batch_size=1024,
+                batch_size=504,  # 原始: 1024，减少训练批次大小，确保能被seq_length=6整除
                 discount=0.98,
                 use_mix_rollout=True,
                 update_z_every_step=100,
@@ -664,7 +727,7 @@ def train_bfm_zero():
             aux_rewards=['penalty_torques', 'penalty_action_rate', 'limits_dof_pos', 'limits_torque', 'penalty_undesired_contact', 'penalty_feet_ori', 'penalty_ankle_roll', 'penalty_slippage'],
             aux_rewards_scaling={'penalty_action_rate': -0.1, 'penalty_feet_ori': -0.4, 'penalty_ankle_roll': -4.0, 'limits_dof_pos': -10.0, 'penalty_slippage': -2.0, 'penalty_undesired_contact': -1.0, 'penalty_torques': 0.0, 'limits_torque': 0.0},
             cudagraphs=False,
-            compile=True
+            compile=False, 
         ),
         motions='',
         motions_root='',
@@ -680,7 +743,14 @@ def train_bfm_zero():
             disable_domain_randomization=False,
             relative_config_path='exp/bfm_zero/bfm_zero',
             include_last_action=True,
-            hydra_overrides=['robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
+            hydra_overrides=[
+                'robot=g1/g1_29dof_hard_waist', 
+                'robot.control.action_scale=0.25', 
+                'robot.control.action_clip_value=5.0', 
+                'robot.control.normalize_action_to=5.0', 
+                f'env.config.headless={headless}',
+                'env.config.lie_down_init=True', 
+                'env.config.lie_down_init_prob=0.3'],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,
@@ -689,9 +759,11 @@ def train_bfm_zero():
             make_config_g1env_compatible=False,
             root_height_obs=True
         ),
-        work_dir='results/bfmzero-isaac',
+        work_dir=(
+            f'results/bfmzero-isaac-low/{time.strftime("%Y%m%d_%H%M%S")}'
+        ),
         seed=4728,
-        online_parallel_envs=1024,
+        online_parallel_envs=1,  # TODO 512原始: 1024，减少并行环境数量
         log_every_updates=384000,
         num_env_steps=384000000,
         update_agent_every=1024,
@@ -705,13 +777,15 @@ def train_bfm_zero():
         prioritization_scale=2.0,
         prioritization_mode='exp',
         use_trajectory_buffer=True,
-        buffer_size=5120000,
+        buffer_size=2560000,  # 原始: 5120000，减少缓冲区大小
         use_wandb=False,
+        use_tensorboard=True,  # 启用TensorBoard
+        tensorboard_log_dir='tensorboard_logs',  # TensorBoard日志目录
         wandb_ename='yitangl',  # your wandb entity (username/team), empty = default from wandb login
         wandb_gname='bfmzero-isaac',  # run group
         wandb_pname='bfmzero-isaac',  # your wandb project name
         load_isaac_expert_data=True,
-        buffer_device='cuda',
+        buffer_device='cuda',  # 使用CUDA存储缓冲区
         disable_tqdm=True,
         evaluations=[HumanoidVerseIsaacTrackingEvaluationConfig(name='HumanoidVerseIsaacTrackingEvaluationConfig', generate_videos=False, videos_dir='videos', video_name_prefix='unknown_agent', name_in_logs='humanoidverse_tracking_eval', env=None, num_envs=1024, n_episodes_per_motion=1)],
         eval_every_steps=9600000,
@@ -721,9 +795,23 @@ def train_bfm_zero():
     workspace.train()
 
 
+
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Train BFM-Zero humanoid agent"
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run training in headless mode (no GUI)"
+    )
+    args = parser.parse_args()
+
     # This is the bare minimum CLI interface to launch experiments, but ideally you should
     # launch your experiments from Python code (e.g., see under "scripts")
-    train_bfm_zero()
+    train_bfm_zero(headless=args.headless)
+
 
 # uv run --no-cache -m humanoidverse.meta_online_entry_point

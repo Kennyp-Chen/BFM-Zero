@@ -22,12 +22,39 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 
-def main(model_folder: Path, data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = False, motion_list: list[int] = [25]):
-    # motion_list: motion ids to evaluate (default [25])
+def convert_29dof_to_23dof(joint_names_29: list[str], params_29: np.ndarray) -> np.ndarray:
+    """
+    Convert 29DoF parameters to 23DoF by removing specific joints.
+    """
+    # Joints to remove
+    joints_to_remove = {
+        'waist_roll_joint',
+        'waist_pitch_joint',
+        'left_wrist_pitch_joint',
+        'left_wrist_yaw_joint',
+        'right_wrist_pitch_joint',
+        'right_wrist_yaw_joint'
+    }
     
+    # Filter out the joints to remove
+    indices_to_keep = [
+        i for i, joint_name in enumerate(joint_names_29)
+        if joint_name not in joints_to_remove
+    ]
+    
+    params_23 = params_29[..., indices_to_keep]
+    
+    return params_23
+
+
+def main(model_folder: Path = Path("results/23dof-bfmzero-isaac-low/20260407_182514"), data_path: Path | None = None, headless: bool = True, device="cuda", simulator: str = "isaacsim", save_mp4: bool=False, disable_dr: bool = False, disable_obs_noise: bool = False, motion_list: list[int] = [25], robot_dof: int = 29):
+    # motion_list: motion ids to evaluate (default [25])
+    motion_list = list(range(40))
     model_folder = Path(model_folder)
 
-    model = load_model_from_checkpoint_dir(model_folder / "checkpoint", device=device)
+    # model = load_model_from_checkpoint_dir(model_folder / "checkpoint", device=device)
+    model = load_model_from_checkpoint_dir(model_folder / "checkpoint_mode_134400000l", device=device)
+    
     model.to(device)
     model.eval()
     model_name = "model"
@@ -40,13 +67,13 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
     if data_path is not None:
         config["env"]["lafan_tail_path"] = str(Path(data_path).resolve())
     elif not Path(config["env"].get("lafan_tail_path", "")).exists():
-        default_path = HUMANOIDVERSE_DIR / "data" / "lafan_29dof.pkl"
+        default_path = HUMANOIDVERSE_DIR / "data" / f"lafan_{robot_dof}dof.pkl"
         if default_path.exists():
             config["env"]["lafan_tail_path"] = str(default_path)
         else:
-            config["env"]["lafan_tail_path"] = "data/lafan_29dof.pkl"
+            config["env"]["lafan_tail_path"] = f"data/lafan_{robot_dof}dof.pkl"
     # import ipdb; ipdb.set_trace()
-    config["env"]["hydra_overrides"].append("env.config.max_episode_length_s=10000")
+    config["env"]["hydra_overrides"].append("env.config.max_episode_length_s=10000") # 似乎可以改
     config["env"]["hydra_overrides"].append(f"env.config.headless={headless}")
     config["env"]["hydra_overrides"].append(f"simulator={simulator}")
     config["env"]["disable_domain_randomization"] = disable_dr
@@ -62,7 +89,9 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
         z_dim=model.cfg.archi.z_dim,
         history=('history_actor' in model.cfg.archi.actor.input_filter.key),
-        use_29dof=True,
+        # use_29dof=True,
+        use_29dof=(robot_dof == 29),
+
     )
     print(f"Exported model to {output_dir}/{model_name}.onnx")
 
@@ -89,11 +118,21 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         # we visulize the first env
         obs, obs_dict = get_backward_observation(env, 0, use_root_height_obs=use_root_height_obs)
 
-        expert_qpos = np.concatenate([
-            obs_dict["ref_body_pos"][:,0].cpu().numpy(),
-            np.roll(obs_dict["ref_body_rots"][:,0].cpu().numpy(),1,axis=-1),
-            obs_dict["dof_pos"].cpu().numpy()
-        ], axis=-1)
+        dof_pos = obs_dict["dof_pos"].cpu().numpy()
+        if robot_dof == 23:
+            # Assuming the order is defined by the environment's joint names
+            joint_names = env.dof_names
+            expert_qpos = np.concatenate([
+                obs_dict["ref_body_pos"][:,0].cpu().numpy(),
+                np.roll(obs_dict["ref_body_rots"][:,0].cpu().numpy(), 1, axis=-1),
+                dof_pos
+            ], axis=-1)
+        else:
+            expert_qpos = np.concatenate([
+                obs_dict["ref_body_pos"][:,0].cpu().numpy(),
+                np.roll(obs_dict["ref_body_rots"][:,0].cpu().numpy(),1,axis=-1),
+                dof_pos
+            ], axis=-1)
 
         # import ipdb; ipdb.set_trace()
 
@@ -135,11 +174,11 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
     joint_pos = [wrapped_env._env.simulator.dof_state[..., 0].clone().cpu().numpy()]
 
     # Visualization length: match inference length so expert and policy videos align
-    episode_len = z.shape[0]
-    episode_len = 100
+    # episode_len = z.shape[0]
+    episode_len = 50# 视频长度
     print(f"Saving video for tracking ({episode_len} steps)")
     if save_mp4:
-        rgb_renderer = IsaacRendererWithMuJoco(render_size=256)
+        rgb_renderer = IsaacRendererWithMuJoco(render_size=256, robot_dof=robot_dof)
         # Only render 1 + episode_len frames (same as frames list), not the full motion
         expert_video = rgb_renderer.from_qpos(expert_qpos[: 1 + episode_len])
         frames = [rgb_renderer.render(wrapped_env._env, 0)[0]]

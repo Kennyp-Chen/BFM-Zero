@@ -241,7 +241,11 @@ class FBAgent:
 
             diff = Ms - discount * target_M  # num_parallel x batch x batch
             fb_offdiag = 0.5 * (diff * self.off_diag).pow(2).sum() / self.off_diag_sum
-            fb_diag = -torch.diagonal(diff, dim1=1, dim2=2).mean() * Ms.shape[0]
+            # Handle different dimensions when num_parallel=1
+            if diff.dim() == 3:
+                fb_diag = -torch.diagonal(diff, dim1=1, dim2=2).mean() * Ms.shape[0]
+            else:  # diff.dim() == 2, when num_parallel=1
+                fb_diag = -torch.diagonal(diff).mean() * Ms.shape[0]
             fb_loss = fb_offdiag + fb_diag
 
             # compute orthonormality loss for backward embedding

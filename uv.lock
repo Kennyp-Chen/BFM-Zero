@@ -868,7 +868,8 @@ wheels = [
 
 [[package]]
 name = "humenv"
-source = { editable = "external/humenv" }
+version = "0.2.0"
+source = { git = "https://github.com/facebookresearch/humenv.git#0548761a19b783c6a3548a14a8c4ea1ca35e94af" }
 dependencies = [
     { name = "absl-py" },
     { name = "dm-control" },
@@ -878,21 +879,6 @@ dependencies = [
     { name = "numpy" },
     { name = "packaging" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "absl-py" },
-    { name = "dm-control", specifier = ">=1.0.24" },
-    { name = "gymnasium", specifier = ">=0.26" },
-    { name = "h5py", specifier = ">=3.11.0" },
-    { name = "mujoco", specifier = ">=3.2.3" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "packaging" },
-    { name = "pot", marker = "extra == 'bench'", specifier = ">0.9" },
-    { name = "torch", marker = "extra == 'bench'", specifier = ">=2" },
-    { name = "tqdm", marker = "extra == 'bench'", specifier = ">4.66" },
-]
-provides-extras = ["bench"]
 
 [[package]]
 name = "hydra-core"
@@ -1902,7 +1888,7 @@ requires-dist = [
     { name = "exca", specifier = ">=0.2.5" },
     { name = "hf-xet", specifier = ">=1.1.2" },
     { name = "huggingface-hub", specifier = ">=0.30.2" },
-    { name = "humenv", editable = "external/humenv" },
+    { name = "humenv", git = "https://github.com/facebookresearch/humenv.git" },
     { name = "hydra-core", specifier = ">=1.2.0" },
     { name = "isaaclab", extras = ["all", "isaacsim"], marker = "sys_platform == 'linux'", specifier = "==2.0.2" },
     { name = "isaacsim", extras = ["all", "extscache"], marker = "sys_platform == 'linux'", specifier = "==4.5.0" },
