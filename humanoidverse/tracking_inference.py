@@ -137,6 +137,7 @@ def main(model_folder: Path = Path("results/23dof-bfmzero-isaac-low/20260407_182
         # import ipdb; ipdb.set_trace()
 
         z = tracking_inference(tree_map(lambda x: x[1:], obs))
+        output_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(z.cpu().numpy(), output_dir / f"zs_{MOTION_ID}.pkl")
         print(f"Saved zs_{MOTION_ID}.pkl")
         

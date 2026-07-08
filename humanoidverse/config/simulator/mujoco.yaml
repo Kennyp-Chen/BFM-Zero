@@ -1,0 +1,18 @@
+# @package _global_
+
+# Env structure
+simulator:
+  _target_: humanoidverse.simulator.mujoco.mujoco.MuJoCo
+  _recursive_: False
+  config:
+    name: "mujoco"
+    terrain: ${terrain}
+    plane:
+        static_friction: 1.0
+        dynamic_friction: 1.0
+        restitution: 0.0
+    sim:
+      fps: 200
+      control_decimation: 4
+      substeps: 1
+      render_mode: "human" # [None, "human", "rgb_array"]
