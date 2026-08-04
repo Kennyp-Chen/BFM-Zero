@@ -2,7 +2,7 @@
 
 ## What This Is
 
-BFM-Zero (LeCAR-Lab) fork for humanoid RL training and AMP stage-2 fine-tuning. This working copy (`HT_BFM`) is **not a git repository**: there is no `.git/`, the `gh` CLI is not installed, and no remote is configured. Upstream is `https://github.com/LeCAR-Lab/BFM-Zero` (motion-data fallback: `https://huggingface.co/LeCAR-Lab/BFM-Zero`). New reusable procedures belong in `docs/` (runbooks already exist for AMP stage-2, task migration, checkpoint playback).
+BFM-Zero (LeCAR-Lab) fork for humanoid RL training and AMP stage-2 fine-tuning. This repo is under git on branch **`HT`**: its root commit is the exact `bfm-command` tree from `HighTorque-Locomotion/HT_BFM`, and `HEAD` carries only local tweaks (`AGENTS.md`, `.gitignore`). Remotes: `origin` = `Kennyp-Chen/BFM-Zero` (your fork), `upstream` = `HighTorque-Locomotion/HT_BFM` (has `bfm-command`; `origin`'s `main` is unrelated — it tracks `LeCAR-Lab/BFM-Zero`). Motion-data fallback: `https://huggingface.co/LeCAR-Lab/BFM-Zero`. New reusable procedures belong in `docs/` (runbooks already exist for AMP stage-2, task migration, checkpoint playback).
 
 ## Environment
 
@@ -36,9 +36,14 @@ ruff check humanoidverse data_process               # lint (140-col, import sort
 - Inference scripts: `--simulator mujoco` runs without Isaac Sim/Isaac Lab; `--no-headless` shows the viewer; `--save_mp4` renders videos. Isaac Sim paths need GPU + Linux.
 - Distributed training runs via `torchrun --nproc_per_node=...`; consult `tuning-log.md` before touching distributed sync code (flat-gradient buckets, checksums, SyncBatchNorm were added there and are load-bearing).
 
+## Git & Network
+
+- GitHub bulk traffic is throttled from this machine (HTTPS pack transfers crawl at ~20-30KB/s; a full 1GB clone dies mid-transfer). `~/.ssh/config` routes `github.com` through `ssh.github.com:443`, which handles small/medium packs fast (a ~114MB push took 30s). Never attempt full fetches of `upstream` (~1GB); if only refs/trees are needed use `git fetch --filter=blob:none upstream bfm-command` (completed in ~10s).
+- Keep commits small with short imperative lowercase summaries. Work happens on branch `HT`; push with plain `git push origin HT` (force-push only deliberately).
+
 ## Gotchas
 
-- `humanoidverse/data/` currently holds only `robots/` (URDFs). The LaFan `.pkl` motion files are **absent** here: they are LFS-tracked (`.gitattributes`) and gitignored. Fetch via `git lfs pull` after git init/clone, or from the HF mirror.
+- The LaFan `.pkl` motion files are **absent** here: they are LFS-tracked (`.gitattributes`) and gitignored. Fetch via `git lfs pull` or the HF mirror. Robot assets under `humanoidverse/data/robots/` and `model/` ARE tracked on this branch (added with `git add -f`), but `.gitignore`'s `humanoidverse/data` rule still hides the former from plain `git add` — use `git add -f humanoidverse/data/robots` to update them. `config/env/` is tracked normally since `.gitignore`'s `env/` was anchored to `/env/`.
 - `amp_stage2.py` hardcodes default paths (`huiying/.../checkpoint`, `dataset/.../run.pkl`, `0803陈建宏23dof2.zip`) that do **not** exist in this working copy — always pass explicit `--model_folder`, dataset, and robot paths.
 - Do not commit secrets, private machine paths (e.g. `/data/laihuiying/...`), checkpoints, or regenerated logs. Keep robot asset, motion-data, and config names in sync so paths resolve in both Isaac Sim and MuJoCo.
-- Style: python 3.10/3.11-compatible, `snake_case`, four-space indent, ruff 140-col limit; match existing Hydra naming for new YAML/robot identifiers. If git is initialized later, keep commits small with short imperative lowercase summaries.
+- Style: python 3.10/3.11-compatible, `snake_case`, four-space indent, ruff 140-col limit; match existing Hydra naming for new YAML/robot identifiers.
