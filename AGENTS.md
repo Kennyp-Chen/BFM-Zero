@@ -1,38 +1,44 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## What This Is
 
-- `humanoidverse/` contains the training, inference, simulator, agent, utility, and motion-library Python packages.
-- `humanoidverse/config/` stores Hydra YAML configuration grouped by experiment, robot, simulator, rewards, observations, and callbacks.
-- `data_process/` contains motion-conversion and dataset-generation scripts; `dataset/` stores local motion data.
-- `static/`, `model/`, `huiying/`, and `logs/` contain visual assets, checkpoints, experiment outputs, and run records. Treat generated artifacts as data, not source.
-- `docs/` contains checkpoint/playback notes. Add new reusable documentation there rather than embedding long procedures in code.
+BFM-Zero (LeCAR-Lab) fork for humanoid RL training and AMP stage-2 fine-tuning. This working copy (`HT_BFM`) is **not a git repository**: there is no `.git/`, the `gh` CLI is not installed, and no remote is configured. Upstream is `https://github.com/LeCAR-Lab/BFM-Zero` (motion-data fallback: `https://huggingface.co/LeCAR-Lab/BFM-Zero`). New reusable procedures belong in `docs/` (runbooks already exist for AMP stage-2, task migration, checkpoint playback).
 
-## Build, Test, and Development Commands
+## Environment
 
-Create the documented environment with `uv sync` (or use the project Conda environment), then run commands from the repository root.
+- Canonical env is Conda env **`HT_BFM`** (python 3.11, torch 2.7+cu128, mujoco 3.8.1, isaacsim 5.1.0.0, IsaacLab editable from `../IsaacLab2.3`) defined in `environment.yml`. **It is not yet created on this machine** (only `base` exists).
+- `pyproject.toml`/uv is stale for this fork: it pins python `==3.10.*`, isaaclab 2.0.2 / isaacsim 4.5.0, so `uv sync` produces a different env than the Conda one. Prefer Conda; only use uv if the task's deps match pyproject.
+- Run entrypoints from the repo root with the env active.
+
+## Layout
+
+- `humanoidverse/` — the package. `train.py` is the tyro/Hydra training entry (wandb, torchrun multi-GPU). `agents/` = FB / FB-CPR / FB-CPR-AUX agents, buffers, wrappers; `envs/` = `legged_base_task`, `legged_robot_motions`, `piplus_env_helper`, `g1_env_helper`; `simulator/` = `base_simulator`, `isaacgym`, `isaacsim`, `mujoco`, `genesis`; `utils/` = `asset_paths.py`, `motion_lib/`, `torch_utils.py`.
+- `humanoidverse/config/` — Hydra YAML. `base.yaml` composes `base/hydra`, `base/structure`, `callbacks/model_save`, `callbacks/autoresume`. Groups: `exp/` (`bfm_zero`, `bfm_zero_h1`, `bfm_zero_piplus`), `robot/` (`g1`, `Hi`, `piplus`), `env/`, `simulator/` (`isaacsim.yaml`, `mujoco.yaml`), `obs/`, `rewards/`, `terrain/`, `callbacks/`, `domain_rand/`. Valid robot identifiers are the `SUPPORTED_ROBOTS` tuple in `train.py` (e.g. `PiPlus_S_12L8A0G2H1W_LSE`, `Hi_P_12L10A0G2H1W_260402`).
+- `data_process/` — motion-conversion / dataset-augmentation scripts (piplus/GMR/AMP); generated datasets go to `data_process/dataset` (gitignored).
+- `tests/` — unittest smoke tests for `amp_stage2` / `amp_stage2_play`. They import `humanoidverse.amp_stage2`, so they need the full env (not just MuJoCo).
+- `tuning-log.md` — chronological record of distributed-training tuning on remote machines; append to it when changing training hyperparameters or launching a new run.
+- `static/`, `model/`, `logs/` (default Hydra `base_dir`), `humanoidverse/data`, `wandb/` are generated artifacts — data, not source.
+
+## Commands
 
 ```bash
-uv run python -m humanoidverse.train                 # start training
-uv run python -m humanoidverse.tracking_inference --help
-uv run python -m humanoidverse.visualize_motion --help
-uv run ruff check humanoidverse data_process              # lint
+conda activate HT_BFM
+python -m humanoidverse.train --help                # training CLI (tyro)
+python -m humanoidverse.tracking_inference --help   # tracking inference + ONNX export
+python -m humanoidverse.goal_inference --help
+python -m humanoidverse.reward_inference --help
+python -m humanoidverse.amp_stage2 --help           # stage-2 AMP fine-tune (frozen PiPlus BFM)
+python -m humanoidverse.amp_stage2_play --help      # rollout/playback of stage-2 policy
+python -m unittest discover -s tests                # smoke tests
+ruff check humanoidverse data_process               # lint (140-col, import sorting; E402/E731 ignored)
 ```
 
-Isaac Sim requires its supported Linux installation and GPU; use `--simulator mujoco` for MuJoCo-only inference or visualization where supported. Large motion/checkpoint files may require `git lfs pull`.
+- Inference scripts: `--simulator mujoco` runs without Isaac Sim/Isaac Lab; `--no-headless` shows the viewer; `--save_mp4` renders videos. Isaac Sim paths need GPU + Linux.
+- Distributed training runs via `torchrun --nproc_per_node=...`; consult `tuning-log.md` before touching distributed sync code (flat-gradient buckets, checksums, SyncBatchNorm were added there and are load-bearing).
 
-## Coding Style & Naming Conventions
+## Gotchas
 
-Use Python 3.10/3.11-compatible code, four-space indentation, descriptive `snake_case` names, and `PascalCase` for classes. Keep imports explicit and functions focused. Ruff is configured with a 140-character line limit and import sorting; run it before submitting changes. Match existing Hydra naming conventions for YAML files and robot/config identifiers.
-
-## Testing Guidelines
-
-There is no dedicated automated test suite currently checked in. For changes, run `uv run ruff check ...` and perform the narrowest relevant smoke test: import the changed module, invoke its `--help`, or run a short headless MuJoCo rollout. Do not require Isaac Sim for tests that can exercise MuJoCo or pure Python paths.
-
-## Commit & Pull Request Guidelines
-
-Recent commits use short, imperative, lowercase summaries such as `fix bug of piplus action range` and `Add new robot ...`. Keep commits focused and explain the behavioral impact. Pull requests should include a concise description, affected robot/simulator/config, validation commands and results, linked issue when applicable, and screenshots or videos for visualization or policy-behavior changes.
-
-## Configuration & Data Safety
-
-Do not commit secrets, private machine paths, or regenerated checkpoints/logs unless explicitly required. Preserve existing user changes and keep robot asset, motion-data, and config updates synchronized so names and paths resolve in both Isaac Sim and MuJoCo.
+- `humanoidverse/data/` currently holds only `robots/` (URDFs). The LaFan `.pkl` motion files are **absent** here: they are LFS-tracked (`.gitattributes`) and gitignored. Fetch via `git lfs pull` after git init/clone, or from the HF mirror.
+- `amp_stage2.py` hardcodes default paths (`huiying/.../checkpoint`, `dataset/.../run.pkl`, `0803陈建宏23dof2.zip`) that do **not** exist in this working copy — always pass explicit `--model_folder`, dataset, and robot paths.
+- Do not commit secrets, private machine paths (e.g. `/data/laihuiying/...`), checkpoints, or regenerated logs. Keep robot asset, motion-data, and config names in sync so paths resolve in both Isaac Sim and MuJoCo.
+- Style: python 3.10/3.11-compatible, `snake_case`, four-space indent, ruff 140-col limit; match existing Hydra naming for new YAML/robot identifiers. If git is initialized later, keep commits small with short imperative lowercase summaries.
