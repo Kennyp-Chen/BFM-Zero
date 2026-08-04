@@ -1,0 +1,96 @@
+# @package _global_
+
+defaults:
+  - /env: legged_motions
+  - /simulator: isaacsim
+  - /domain_rand: domain_rand
+  - /rewards: reward_bfm_zero
+  - /robot: piplus/PiPlus_S_12L8A0G2H1W_LSE
+  - /terrain: terrain_locomotion_plane
+  - /obs: bfm_zero_obs
+  - /callbacks: im_eval
+  - _self_
+
+exp_base: ${hydra:runtime.choices.exp}
+exp_var: piplus_lse
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 50
+project_name: BFMZeroPiPlus
+
+robot:
+  motion:
+    motion_file: data/piplus_lse_lafan.pkl
+    max_len: 450
+  asset:
+    self_collisions: 0
+
+domain_rand:
+  push_robots: True
+  push_interval_s: [1, 3]
+  max_push_vel_xy: 0.5
+  max_push_vel_z: 0.1
+  max_push_ang_vel: 0.5 # include roll,yaw,pitch
+  push_robot_recovery_time: 2.0
+
+  randomize_base_com: True
+  base_com_range:
+    x: [-0.02, 0.02]
+    y: [-0.02, 0.02]
+    z: [-0.02, 0.02]
+
+  randomize_link_mass: True
+  link_mass_range: [0.8, 1.2]
+
+  randomize_pd_gain: True
+  kp_range: [0.8, 1.2]
+  kd_range: [0.9, 1.1]
+
+  randomize_friction: True
+  friction_range: [0.3, 2.0]
+  restitution_range: [0.05, 0.5]
+  friction_num_buckets: 512
+  friction_make_consistent: True
+
+  randomize_default_dof_pos: True
+  default_dof_pos_noise_range: [-0.02, 0.02]
+  randomize_reset_dof_state: True
+  reset_dof_pos_range: [-0.15, 0.15]
+  reset_dof_vel_range: [0.0, 0.0]
+
+   # control delay
+  randomize_ctrl_delay : True
+  ctrl_delay_step_range : [0, 2] # integer max real delay is 90ms
+
+rewards:
+  reward_penalty_curriculum: True
+  reward_penalty_degree: 0.00001
+  reward_scales:
+    penalty_undesired_contact: -20.0
+  # reward_scales:
+  #   # feet_slide: -10.0
+  #   # penalty_stumble: -1.0
+  # reward_penalty_reward_names: [
+  #   "penalty_torques",
+  #   "penalty_action_rate",
+  #   "limits_dof_pos",
+  #   "limits_torque",
+  #   "penalty_slippage",
+  #   # "feet_slide",
+  #   # "penalty_stumble",
+  #   "penalty_undesired_contact",
+  #   "penalty_ankle_roll",
+  #   "penalty_feet_ori"
+  #   ]
+
+env:
+  config:
+    resample_motion_when_training: False
+    termination:
+      terminate_when_motion_far: False
+    termination_curriculum:
+      terminate_when_motion_far_curriculum: False
+      terminate_when_motion_far_threshold_min: 0.25
+      terminate_when_motion_far_threshold_max: 0.5
+      terminate_when_motion_far_curriculum_degree: 0.000025
