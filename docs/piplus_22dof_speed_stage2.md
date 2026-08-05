@@ -364,3 +364,19 @@ Git commit：
   保留本分支 `AGENTS.md`，以维持本实验进度记录约定。
 - 目标分支覆盖了 CPU PhysX/software Vulkan fallback 的 Isaac 启动器改动。故恢复训练前必须由原生 GPU
   Isaac Sim smoke 验证环境；不能使用原 CPU fallback 命令假设其仍受支持。该平台问题由另一 session 继续处理。
+
+## 2026-08-05 - 本地 zhuzejian/UFO 代码与环境勘察
+
+- `/root/autodl-tmp/zhuzejian` 确实存在，但当前账号只能看到目录元数据：权限为 `0700`，所有者为 `zhuzejian:zhuzejian`。
+  当前账号不是 root，也不能通过 `runuser`/`su` 读取，因此尚未能检查其原始仓库、shell 启动脚本或 Conda 环境。
+- 可读的相关副本为 `/root/autodl-tmp/chenyupeng/UFO_HT`、`/root/autodl-tmp/chenyupeng/UFO` 和
+  `/root/autodl-tmp/hejunfu/projects/UFO-main`。这些副本的训练入口已经是 MuJoCo/MJLab；未发现
+  `AppLauncher`、`SimulationContext`、Isaac Sim 训练入口或 `ht_urdf` Python/ROS 包，因此不能据此推断
+  zhuzejian 原始 Isaac Sim 启动方式。
+- 可复用的实现事实：H0W 资产被内化到 `humanoidverse/data/robots/piplus_h0w/`，MuJoCo XML 为
+  `xml/piplus_h0w_bfm.xml`，训练配置使用仓库相对路径；`UFO-main` 的 H20 脚本额外固定了 CUDA 12.8
+  PyTorch、显式 GPU 列表、独立缓存目录和 `NCCL_NVLS_ENABLE=0`。这解释了当前 HT_BFM 配置的差异：它
+  仍把 Isaac/URDF 资产写成 `package://ht_urdf/...`，但本机环境没有可导入的 `ht_urdf` 包。
+- 下一步门禁：请目录所有者对 `/root/autodl-tmp/zhuzejian` 开放至少 `r-x` 权限后，再核对其 Isaac Sim
+  版本、`isaaclab.sh`/启动器参数、资产路径和环境变量；在此之前不把 UFO/MJLab 的 MuJoCo 结果当成
+  Isaac Sim 兼容性证据，也不恢复 GPU PhysX 训练。
