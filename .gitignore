@@ -208,6 +208,7 @@ rosbags
 models
 model/piplus_h0w_bfm/
 zero-piplus-h0w-isaac-20260629_214205-22.zip
+logs/
 instinct-venv
 results/
 data_process/dataset
