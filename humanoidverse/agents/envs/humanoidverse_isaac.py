@@ -639,6 +639,11 @@ def instantiate_isaac_sim(num_envs: int, enable_cameras: bool = False, headless:
     args_cli.num_envs = num_envs
     args_cli.enable_cameras = enable_cameras
     args_cli.headless = headless
+    # Each torchrun worker owns one simulation GPU.  Kit's renderer must not
+    # independently activate every visible GPU, including for single-worker
+    # headless smoke tests.
+    renderer_kit_args = "--/renderer/multiGpu/enabled=false --/renderer/multiGpu/autoEnable=false --/renderer/multiGpu/maxGpuCount=1"
+    args_cli.kit_args = f"{args_cli.kit_args} {renderer_kit_args}".strip()
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         # Let IsaacLab select the worker-local GPU and disable Kit's
         # single-process multi-GPU renderer for torchrun workers.

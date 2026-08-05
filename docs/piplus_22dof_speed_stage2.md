@@ -171,16 +171,16 @@ python -m humanoidverse.speed_stage2_play \
 
 ## 7. 当前阶段与 TODO
 
-当前阶段：**冒烟测试中**。
+当前阶段：**Isaac Sim 冒烟测试被运行环境阻塞**。
 
 已完成：22DoF 资产和静态 contract 验证；ONNX decoder 616->22 前向；动态 batch 输出与原始逐条 ONNX 对齐（最大误差 `1.56e-7`）；MuJoCo 单环境一轮 PPO smoke；数据盘默认输出；错误的四卡预检进程已清理。
 
-尚未完成：headless Isaac Sim 多环境 smoke 与正确四卡 DDP preflight。此前一次本机 Isaac Sim 单进程初始化超过六分钟未完成；随后四卡预检命令因空 `RUN_DIR` 形成孤儿 worker，未进入训练且已强制停止。两者均不能视为训练成功。
+未完成：headless Isaac Sim 多环境 smoke 与四卡 DDP preflight。2026-08-05 的受控单卡、1 environment、1 rollout step 测试在环境构建后约 26 秒报 `VkResult: ERROR_DEVICE_LOST`，并生成 NVIDIA Aftermath crash dump。随后显式关闭 Kit renderer multi-GPU 后，只有 GPU 0 标记为 Active，仍在约 19 秒报相同错误。因此问题不属于 DDP rank 映射、四卡显存竞争、Kit renderer multi-GPU 或 PPO 代码。每次 Kit 均不能正常退出，需要 `SIGKILL`，但之后 GPU 0-3 显存已经释放。此前所有 Isaac Sim 尝试均不能视为训练成功。
 
 后续 TODO：
 
-1. 用第 5 节的绝对路径命令完成四卡 `checkpoint_5.pt` preflight，记录每个 rank 的 Isaac 初始化、吞吐、NCCL 和 GPU 内存。
-2. 若 Isaac 初始化持续卡住，优先抓取每个 rank 的 stdout/stderr、确认 IsaacLab Kit 首次缓存/驱动/`CUDA_VISIBLE_DEVICES` 行为，再修复启动路径；不要绕过为 MuJoCo 多环境。
+1. 先由机器维护侧检查或重启该容器的 Isaac Sim/Vulkan GPU 上下文，再运行本表的单卡受控命令。H20 上 `nvidia-smi --gpu-reset` 返回 `Not Supported`，训练进程不能替代宿主重启完成复位。
+2. 单卡命令必须产出 `checkpoint_1.pt` 且无 `ERROR_DEVICE_LOST` 后，才重新运行第 5 节的四卡 `checkpoint_5.pt` preflight，记录每个 rank 的 Isaac 初始化、吞吐、NCCL 和 GPU 内存。
 3. 预检通过后运行短窗口（例如 100-500 iterations），观察 reward、vx/vy/yaw MAE、termination rate、KL 和实际 steps/s。
 4. 定期复制 checkpoint 到本地，使用第 6 节 GUI playback 对 stand、前进、横移和纯 yaw 指令做视觉检查。
 5. 根据吞吐决定是否安装支持 CUDA 的 ONNX Runtime；在此之前保持动态 batch CPU decoder 并记录其成本。
@@ -199,6 +199,8 @@ python -m humanoidverse.speed_stage2_play \
 | 2026-08-05 | Isaac Sim，四卡 preflight | 首次命令 `RUN_DIR` 为空，四个 worker 没有实际输出路径且成为孤儿；已停止 | 命令无效，需用本文件的绝对路径版本重试 |
 | 2026-08-05 | Isaac Sim，四卡 preflight | 修正输出路径后报告 Vulkan `ERROR_DEVICE_LOST`；无 checkpoint，已停止 | 初始版本的 worker GPU 处理不正确 |
 | 2026-08-05 | Isaac Sim，四卡 GPU 隔离修复尝试 | 日志显示四个 AppLauncher 都是 `cuda:0`，说明将 `LOCAL_RANK` 重写为 0 反而使四个 Kit 争抢 GPU 0；无 checkpoint，已停止 | 保留原始 `LOCAL_RANK`，移除首四卡命令的 `CUDA_VISIBLE_DEVICES`，待后台重测 |
+| 2026-08-05 12:19 UTC | Isaac Sim，单卡、1 env、1 step 受控 smoke | AppLauncher 正确使用 `cuda:0`，完成环境构建并加载 869 motions；约 26 秒后出现 `VkResult: ERROR_DEVICE_LOST`，生成 `kit_20260805_121935-0.nv-gpudmp`，无 checkpoint；`SIGTERM` 无效，已 `SIGKILL` | 单卡可复现，阻塞在 Isaac Sim/Vulkan 运行环境，禁止继续四卡训练，先修复/重启容器 |
+| 2026-08-05 12:23 UTC | Isaac Sim，单卡 renderer multi-GPU 禁用 smoke | 启动器加入 `renderer/multiGpu/enabled=false`、`autoEnable=false`、`maxGpuCount=1`；Kit 仅标记 GPU 0 Active，但约 19 秒后仍报同一错误，生成 `kit_20260805_122313-0.nv-gpudmp`，无 checkpoint | 启动器已保留该防护；multi-GPU renderer 不是根因，仍须修复 Isaac Sim/Vulkan 环境 |
 
 后续记录模板：
 
