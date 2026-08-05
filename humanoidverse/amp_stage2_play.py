@@ -25,15 +25,11 @@ except ImportError:  # pragma: no cover - exercised only when --gamepad is reque
 
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.amp_stage2 import (
-    DEFAULT_TEACHER_POLICY,
-    TEACHER_POLICY_ACTION_SCALES,
     CommandEncoderPolicy,
-    PiPlusAMPTeacherPolicy,
     _bfm_action,
     _ensure_runtime_cache,
     _to_torch_obs,
     build_piplus_locomotion_env,
-    build_teacher_policy_observation,
     encoder_input_scale,
     flatten_encoder_observation,
     load_command_encoder_policy_state,
@@ -101,16 +97,6 @@ def resolve_expert_dataset(metadata: Mapping[str, object], override: Path | None
         return _existing_path([override], "expert dataset")
     recorded = Path(str(metadata.get("expert_dataset", "")))
     return _existing_path([recorded, PROJECT_ROOT / "dataset/pi_LSE_lafan_260706" / recorded.name], "expert dataset")
-
-
-def resolve_teacher_policy(metadata: Mapping[str, object], override: Path | None) -> Path:
-    if override is not None:
-        return _existing_path([override], "AMP teacher policy")
-    teacher_metadata = metadata.get("teacher_policy", {})
-    recorded_value = teacher_metadata.get("artifact") if isinstance(teacher_metadata, Mapping) else None
-    candidates = [Path(str(recorded_value))] if recorded_value else []
-    candidates.append(Path(DEFAULT_TEACHER_POLICY))
-    return _existing_path(candidates, "AMP teacher policy")
 
 
 def resolve_play_device(requested: str) -> torch.device:
@@ -459,29 +445,11 @@ def play(args: argparse.Namespace) -> None:
     bfm_model.eval()
     for parameter in bfm_model.parameters():
         parameter.requires_grad_(False)
-    teacher = None
-    if "teacher_policy" in metadata:
-        teacher = PiPlusAMPTeacherPolicy(resolve_teacher_policy(metadata, args.teacher_policy), policy_device)
 
     observation, _ = env.reset(to_numpy=False, reset_to_default_pose=True)
     observation_t = _to_torch_obs(observation, policy_device)
     commands = torch.zeros(1, 3, device=policy_device)
-    if teacher is not None:
-        teacher_action_scales = torch.tensor(TEACHER_POLICY_ACTION_SCALES, device=policy_device)
-        bfm_action_scales = torch.tensor(robot_training.bfm_action_position_scales, device=policy_device)
-        encoder_input = teacher.normalize(
-            build_teacher_policy_observation(
-                observation_t,
-                commands,
-                tuple(robot_training.policy_joint_names),
-                teacher_action_scales=teacher_action_scales,
-                bfm_action_scales=bfm_action_scales,
-            )
-        )
-        input_scale = torch.ones(encoder_input.shape[-1], device=policy_device, dtype=encoder_input.dtype)
-    else:
-        encoder_input = flatten_encoder_observation(observation_t, commands)
-        input_scale = encoder_input_scale(observation_t, commands)
+    encoder_input = flatten_encoder_observation(observation_t, commands)
     policy = CommandEncoderPolicy(
         encoder_input.shape[-1],
         int(metadata["z_dim"]),
@@ -489,7 +457,7 @@ def play(args: argparse.Namespace) -> None:
         hidden_layers=int(metadata["command_encoder_hidden_layers"]),
     ).to(policy_device)
     checkpoint = torch.load(paths.checkpoint, map_location=policy_device, weights_only=False)
-    load_command_encoder_policy_state(policy, checkpoint, input_scale)
+    load_command_encoder_policy_state(policy, checkpoint, encoder_input_scale(observation_t, commands))
     policy.eval()
 
     command_low = np.asarray(metadata["command_range"]["low"], dtype=np.float32)
@@ -611,18 +579,7 @@ def play(args: argparse.Namespace) -> None:
 
             with torch.inference_mode():
                 observation_t = _to_torch_obs(observation, policy_device)
-                if teacher is not None:
-                    encoder_input = teacher.normalize(
-                        build_teacher_policy_observation(
-                            observation_t,
-                            commands,
-                            tuple(robot_training.policy_joint_names),
-                            teacher_action_scales=teacher_action_scales,
-                            bfm_action_scales=bfm_action_scales,
-                        )
-                    )
-                else:
-                    encoder_input = flatten_encoder_observation(observation_t, commands)
+                encoder_input = flatten_encoder_observation(observation_t, commands)
                 raw_z = policy.deterministic_z(encoder_input)
                 action = _bfm_action(bfm_model, observation_t, bfm_model.project_z(raw_z)).to(device)
             observation, _reward, terminated, truncated, _info = env.step(action, to_numpy=False)
@@ -671,7 +628,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bfm-checkpoint", type=Path, default=None)
     parser.add_argument("--robot-config", type=Path, default=None)
     parser.add_argument("--expert-dataset", type=Path, default=None)
-    parser.add_argument("--teacher-policy", type=Path, default=None)
     parser.add_argument("--simulator", choices=("isaacsim", "mujoco"), default="mujoco")
     parser.add_argument("--device", default="auto", help="auto selects CUDA when available, otherwise CPU.")
     parser.add_argument(

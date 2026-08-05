@@ -352,3 +352,15 @@ Git commit：
 - 联网核查：BFM-Zero#13 为同类 H20 GPU 创建失败报告；IsaacSim#431 为 5.1.0 container headless
   `ERROR_DEVICE_LOST`，官方要求完整 Kit log/命令/`nvidia-smi` 继续调查，未给出通用代码修复。详细结论和后续
   验证顺序已记录在第 7.1 节。
+
+## 2026-08-05 - 合并 upstream bfm-command-amponly
+
+- 训练在用户许可下停止；`full_4gpu_isaac_cpu_lvp_20260805_1505/checkpoint_1400.pt` 已用 CPU 成功加载，
+  包含 `policy`、`optimizer`、`iteration=1400` 和 metadata，可作为后续同一训练语义的恢复点。
+- 将 `upstream/bfm-command-amponly` 合并为本仓库 AMP 主线。两个历史没有共同 Git ancestor，因此采用
+  `--allow-unrelated-histories -X theirs`：同名的基础训练/环境/AMP 文件以该分支为准。
+- 保留本分支仅有的 22DoF 实验实现与资产：`speed_stage2.py`、`speed_stage2_play.py`、
+  `piplus_h0w_onnx_decoder.py`、H0W robot assets、speed playback test、TensorBoard converter 和本文档。
+  保留本分支 `AGENTS.md`，以维持本实验进度记录约定。
+- 目标分支覆盖了 CPU PhysX/software Vulkan fallback 的 Isaac 启动器改动。故恢复训练前必须由原生 GPU
+  Isaac Sim smoke 验证环境；不能使用原 CPU fallback 命令假设其仍受支持。该平台问题由另一 session 继续处理。

@@ -87,10 +87,6 @@ class IsaacSim(BaseSimulator):
         sim_config: SimulationCfg = SimulationCfg(dt=1./self.simulator_config.sim.fps, 
                                            render_interval=self.simulator_config.sim.render_interval, 
                                            device=self.sim_device,
-                                           # The headless H20 runtime currently loses the Vulkan device
-                                           # while Fabric initializes.  Direct PhysX tensor access still
-                                           # supports this environment and avoids that failure mode.
-                                           use_fabric=False,
                                            physx=PhysxCfg(bounce_threshold_velocity=self.simulator_config.sim.physx.bounce_threshold_velocity,
                                                           solver_type=self.simulator_config.sim.physx.solver_type,
                                                           max_position_iteration_count=self.simulator_config.sim.physx.num_position_iterations,

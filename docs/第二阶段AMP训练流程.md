@@ -31,10 +31,7 @@ BFM Stage1 checkpoint:
   huiying/bfmzero-piplus-lse-isaac-20260715_143758(1)/checkpoint
 
 AMP expert dataset:
-  dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run.pkl
-
-23DoF AMP teacher policy:
-  0803陈建宏23dof2.zip
+  dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run_with_stand.pkl
 
 PiPlus robot config:
   humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H1W_LSE.yaml
@@ -46,8 +43,6 @@ PiPlus robot config:
 checkpoint 中的 `FBcprAuxModel` 被完整加载后冻结。Stage2 不更新 BFM actor、
 forward/backward map、critic、observation normalizer 或第一阶段 replay buffer。
 只训练 command encoder/value head、AMP WGAN-GP discriminator 和 AMP reward normalizer。
-command encoder 使用教师策略归一化后的 78 维 policy observation，并通过冻结 BFM
-生成 student action，与教师 action 做 Smooth-L1 蒸馏。
 
 `--dry-run` 已验证当前 checkpoint、PiPlus action dimension、AMP 数据和 latent 投影：
 
@@ -55,24 +50,24 @@ command encoder 使用教师策略归一化后的 78 维 policy observation，�
 - latent dimension: `256`
 - `norm_z`: `true`
 - AMP feature dimension: `202`
-- motion count: `148`
-- valid AMP windows: `43364`
+- motion count: `153`
+- valid AMP windows: `44635`
 - projected latent norm: `sqrt(256)=16`
 
 ## 3. 单步训练链路
 
 每个环境步执行以下顺序：
 
-1. 按 `[base_ang_vel, projected_gravity, command, joint_pos, joint_vel, last_action]` 构造教师 78 维输入并归一化。
-2. 教师 MLP 输出 23 维动作，按关节名转换到 Stage2 环境顺序；command encoder 采样 raw `z`。
-3. 调用 checkpoint 的 `project_z(raw_z)`，再送入冻结 BFM actor 得到 student action。
+1. 读取 BFM observation，拼接 `[command, state, last_action, history_actor]`。
+2. command encoder 用 Gaussian policy 采样 raw `z`，记录 log-prob 和 value。
+3. 调用 checkpoint 的 `project_z(raw_z)`，再送入冻结 BFM actor 得到 23 维动作。
 4. Isaac 环境执行动作，计算 UFO 对齐后的环境 reward，并在自动 reset 前保存 terminal state。
 5. 使用本地 root velocity、五个 key-body local position 和 8 帧 23DoF joint history 构造 202 维 online AMP feature。
 6. 计算 MimicLite command-conditioned locomotion reward。
 7. 用专家 AMP feature 和 online feature 更新 WGAN-GP 判别器。
 8. 判别器 raw score 经过 running normalizer 后乘 `amp_weight`，与环境 reward、MimicLite reward 相加。
 9. 按 terminal/truncated 分离的 GAE 计算 PPO advantage/return；真实终止不 bootstrap，timeout 使用 terminal observation 的 value bootstrap。
-10. PPO minibatch 同时更新 command encoder/value head 和动作蒸馏 loss；按保存周期写 Stage2 checkpoint。
+10. PPO 更新 command encoder/value head；按保存周期写 Stage2 checkpoint。
 
 当前调参 run 的 command 范围为 `[-0.8, -0.5, -0.8]` 到 `[0.8, 0.5, 0.8]`，每 `300` 步按 `0.75`
 概率重采样，前 `20` 步为 warmup，command smoothing 为 `0.1`，低速或 stand gate
@@ -97,6 +92,8 @@ MimicLite reward 的最终每步贡献为 `dt * weight * raw_term`：
 | linvel_exp | 2.1 |
 | linvel_projection | 0.6 |
 | angvel_z_exp | 1.4 |
+| backward_velocity_progress | 0.9 |
+| turn_rate_progress | 0.65 |
 | single_foot_contact | 0.75 |
 | angvel_xy_l2 | 0.02 |
 | body_upright | 1.0 |
@@ -183,7 +180,7 @@ rank 0 保存 checkpoint。每卡的 `--num-envs` 是本卡环境数，全局 ba
 ```bash
 python -m humanoidverse.amp_stage2 \
   --bfm-checkpoint huiying/bfmzero-piplus-lse-isaac-20260715_143758\(1\)/checkpoint \
-  --expert-dataset dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run.pkl \
+  --expert-dataset dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run_with_stand.pkl \
   --robot-config humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H1W_LSE.yaml \
   --device cuda --gpu-ids all \
   --num-envs 1024 --iterations 10000 --rollout-steps 32 \

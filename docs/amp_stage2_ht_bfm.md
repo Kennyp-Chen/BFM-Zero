@@ -1,14 +1,15 @@
 # HT_BFM PiPlus 第二阶段 AMP 训练流程
 
 本文档说明 HT_BFM 当前 PiPlus 第二阶段 AMP 训练的实际实现。第二阶段不重新训练
-第一阶段 BFM；Command Encoder 以建宏 23DoF AMP walk policy 为教师做动作蒸馏，
-同时由 AMP discriminator 和 locomotion reward 约束生成动作的运动风格。
+第一阶段 BFM，也不使用动作级 imitation loss，而是在冻结 BFM 的 latent 空间上训练
+一个由速度指令控制的 Command Encoder，并通过 AMP discriminator 约束生成动作的
+运动风格。
 
 ## 1. 目标链路
 
 ```text
 速度指令 command = [vx, vy, wz]
-建宏 AMP teacher observation (归一化后的 78 维)
+                 + BFM actor observation
                  |
                  v
          CommandEncoderPolicy
@@ -19,28 +20,18 @@
                  |
           冻结 BFM Actor
                  |
-              student action
+              action
                  |
       PiPlus Isaac Lab 环境
 ```
 
-教师输入的固定顺序为：
+Command Encoder 的输入为：
 
 ```text
-[base_ang_vel(3), projected_gravity(3), command(3),
- joint_pos(23), joint_vel(23), last_action(23)]
+[vx, vy, wz] + obs["state"] + obs["last_action"] + obs["history_actor"]
 ```
 
-教师 ZIP 中的 ONNX 顺序是 IsaacLab 的 23DoF 顺序；Stage2 环境使用的顺序来自
-`robot.dof_names`。训练入口按关节名显式建立双向 permutation，教师动作先转换到
-Stage2 环境顺序后再用于蒸馏，不能直接按下标复制。
-
-Command Encoder 现在直接使用教师 normalizer 处理后的 78 维输入。旧的 378 维
-`command + state + last_action + history_actor` 输入仅保留给旧 checkpoint 的兼容
-代码路径；旧 checkpoint 不能直接恢复到新的教师输入布局，应从 BFM checkpoint
-重新启动 Stage2。
-
-旧版输入的字段级缩放仍保留给兼容代码路径：
+当前输入会做字段级缩放，但不改变 checkpoint 的输入维度：
 
 - command 使用 `[1.25, 5.0, 1.25]` 缩放；
 - 当前帧和历史中的关节速度使用 `0.05` 缩放；
@@ -66,10 +57,6 @@ Command Encoder 现在直接使用教师 normalizer 处理后的 78 维输入。
 - `latent_mean` 和 `latent_log_std`；
 - PPO value head；
 - AMP discriminator。
-
-动作蒸馏在 PPO 每个 minibatch 中计算：冻结 BFM 用当前 command encoder 的 mean
-latent 生成 student action，和教师 action 做 Smooth-L1 loss。该 loss 只向
-Command Encoder 反传，BFM 参数全部 `requires_grad=False`。
 
 当前 Command Encoder 继承第一阶段 backward map 的结构参数：
 
@@ -97,7 +84,7 @@ humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H1W_LSE.yaml
 默认专家数据：
 
 ```text
-dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run.pkl
+dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run_with_stand.pkl
 ```
 
 当前训练 contract：
@@ -106,7 +93,7 @@ dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run.pkl
 PiPlus policy DoF       23
 BFM action dimension   23
 latent z dimension     256
-expert motions         148
+expert motions         153
 AMP feature dimension  202
 history length         8
 ```
@@ -157,14 +144,14 @@ time-limit truncation 与真实 terminal 分开处理。truncation 会使用 res
 
 每个 rollout step 的顺序为：
 
-1. 按教师顺序拼接 78 维 observation，并使用教师 normalizer；
-2. 教师 MLP 输出 23 维 target action，按关节名映射到 Stage2 顺序；
-3. Command Encoder 采样 `raw_z`、log probability 和 value；
-4. 使用冻结 BFM 的 `project_z()` 得到 actor latent，再输出 student action；
+1. 拼接 observation 和当前 `[vx, vy, wz]`；
+2. Command Encoder 采样 `raw_z`、log probability 和 value；
+3. 使用冻结 BFM 的 `project_z()` 得到 actor latent；
+4. 冻结 BFM actor 输出 23 维 action；
 5. 推进 Isaac 环境并计算环境/locomotion reward；
 6. 更新 8 帧 joint history，构造 policy AMP feature；
-7. 保存 PPO rollout、BFM observation 和教师 action；
-8. rollout 结束后更新 discriminator，再在 PPO minibatch 中计算动作蒸馏 loss。
+7. 保存 PPO rollout、terminal snapshot 和跟踪诊断量；
+8. rollout 结束后更新 discriminator，再计算 AMP reward 和 PPO returns。
 
 当前 command 范围：
 
@@ -191,6 +178,8 @@ locomotion 配置一致。为避免偏航 MAE 被零指令稀释，
 linvel_exp             2.8
 linvel_projection      1.1
 angvel_z_exp           2.6
+backward_velocity_progress 0.9
+turn_rate_progress      0.65
 single_foot_contact    0.85
 angvel_xy_l2           0.035
 body_upright           1.1
@@ -344,8 +333,7 @@ resume 时会：
 - 恢复 policy/discriminator/normalizer；
 - 恢复兼容的 optimizer 状态；
 - 强制使用命令行给出的 policy/discriminator learning rate；
-- 新 checkpoint 的 command encoder 输入为教师归一化后的 78 维；旧的 378 维 Stage2
-  checkpoint 不能直接恢复，必须从冻结 BFM checkpoint 重新初始化 command encoder。
+- 在旧 checkpoint 输入格式下执行等价第一层迁移，并在必要时重置 policy optimizer。
 
 历史目录必须保留。新的 reward、optimizer 或 checkpoint 选择使用新 `work-dir`，不要
 向旧目录覆盖写入。

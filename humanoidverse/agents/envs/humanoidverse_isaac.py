@@ -613,9 +613,7 @@ class HumanoidVerseVectorEnv(VectorEnv):
 _ISAAC_SIM_INITIALIZED = False
 
 
-def instantiate_isaac_sim(
-    num_envs: int, enable_cameras: bool = False, headless: bool = True, device: str | None = None
-):
+def instantiate_isaac_sim(num_envs: int, enable_cameras: bool = False, headless: bool = True):
     global _ISAAC_SIM_INITIALIZED
     if _ISAAC_SIM_INITIALIZED:
         return
@@ -638,25 +636,9 @@ def instantiate_isaac_sim(
         args_cli.device = "cuda:0" if torch.cuda.is_available() else "cpu"
     elif args_cli.device == "cuda":
         args_cli.device = "cuda:0"
-    if device is not None:
-        args_cli.device = device
-        # CPU PhysX is used as a fallback on this H20 host, but Kit still
-        # creates a Vulkan context. Keep those contexts isolated per worker.
-        if device == "cpu" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
-            args_cli.device = f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
     args_cli.num_envs = num_envs
     args_cli.enable_cameras = enable_cameras
     args_cli.headless = headless
-    # Each torchrun worker owns one simulation GPU.  Kit's renderer must not
-    # independently activate every visible GPU, including for single-worker
-    # headless smoke tests.
-    renderer_kit_args = (
-        "--/renderer/multiGpu/enabled=false "
-        "--/renderer/multiGpu/autoEnable=false "
-        "--/renderer/multiGpu/maxGpuCount=1 "
-        "--/physics/fabricUpdateTransformations=false"
-    )
-    args_cli.kit_args = f"{args_cli.kit_args} {renderer_kit_args}".strip()
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         # Let IsaacLab select the worker-local GPU and disable Kit's
         # single-process multi-GPU renderer for torchrun workers.
@@ -851,7 +833,7 @@ class HumanoidVerseIsaacConfig(BaseConfig):
 
         simulator_type = cfg.simulator["_target_"].split(".")[-1]
         if simulator_type == "IsaacSim":
-            instantiate_isaac_sim(num_envs, enable_cameras=self.enable_cameras, headless=cfg.env.config.headless, device=self.device)
+            instantiate_isaac_sim(num_envs, enable_cameras=self.enable_cameras, headless=cfg.env.config.headless)
         isaac_env = LeggedRobotMotions(cfg.env.config, device=self.device)
 
         env = HumanoidVerseVectorEnv(

@@ -43,8 +43,8 @@ cd /home/sunteng/Project/HT_BFM
 conda activate env_isaaclab
 
 python -m humanoidverse.amp_stage2_play \
-  --model-folder logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804 \
-  --checkpoint logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804/checkpoint_22200.pt \
+  --model-folder logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804 \
+  --checkpoint logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804/checkpoint_24200.pt \
   --simulator isaacsim \
   --device cuda:0 \
   --policy-device cpu \
@@ -65,8 +65,8 @@ cd /home/sunteng/Project/HT_BFM
 conda activate env_isaaclab
 
 python -m humanoidverse.amp_stage2_play \
-  --model-folder logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804 \
-  --checkpoint logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804/checkpoint_22200.pt \
+  --model-folder logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804 \
+  --checkpoint logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804/checkpoint_24200.pt \
   --simulator mujoco \
   --device auto \
   --fixed-command 0.4 0.0 0.0
@@ -80,8 +80,8 @@ python -m humanoidverse.amp_stage2_play \
 
 ```bash
 python -m humanoidverse.amp_stage2_play \
-  --model-folder logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804 \
-  --checkpoint logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804/checkpoint_22200.pt \
+  --model-folder logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804 \
+  --checkpoint logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804/checkpoint_24200.pt \
   --simulator isaacsim \
   --device cuda:0 \
   --policy-device cpu \
@@ -102,6 +102,6 @@ cd /home/sunteng/Project/HT_BFM
 conda activate env_isaaclab
 
 python3 "/home/sunteng/Project/deployment/ROS2 Plugin/retarget/instinct_onboard/scripts/export_piplus_bfm_command_onnx.py" \
-  --checkpoint logs/amp_stage2_piplus_lse_4gpu_4096env_1m_piplusquad_resume21200_20260804/checkpoint_22200.pt \
+  --checkpoint logs/amp_stage2_piplus_lse_2gpu_4096env_1m_dense_progress_resume19500_20260804/checkpoint_24200.pt \
   --output huiying/stage2_command_encoder.onnx
 ```

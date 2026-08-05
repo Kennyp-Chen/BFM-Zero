@@ -607,37 +607,11 @@
 
 - Latest result through checkpoint_22200: speed tracking recovered in the 22086-22200 window (vx MAE 0.1639, planar MAE 0.2332, vx slope 0.6436 versus 0.178/0.236/0.4717 before the resume), while yaw remained weaker (yaw MAE 0.2622, yaw slope 0.8372 versus 0.241/0.9359). Termination stayed zero, but value loss rose to 2.38, so classify as partial speed improvement with critic-health risk, not an across-the-board improvement.
 
-## 2026-08-05 10:50 UTC - PiPlus H0W ONNX speed-stage2 smoke test
+## 2026-08-04 22:20:00 CST - Add dense backward and turn progress rewards
 
-- Context: Local MuJoCo PiPlus_S_12L8A0G2H0W, frozen `FBcprAuxModel.onnx` decoder, 1 environment, 1 rollout step, 1 PPO epoch; no AMP discriminator or 23DoF teacher.
-- Adjustment: Connected the exported 616-input/22-action ONNX policy as the H0W decoder. The command encoder produces a normalized 256D latent; the velocity-command reward remains the only task objective.
-- Result: Environment loaded 869 H0W motions, completed one decoder action and PPO update, saved checkpoint_1.pt. reward_mean=0.2184, termination_rate=0.0. This is an interface smoke test only, not a gait-quality evaluation.
-- Files/commands: `model/piplus_h0w_bfm/decoder/bfmzero-piplus-h0w-isaac-20260629_214205/exported/FBcprAuxModel.onnx`; `python -m humanoidverse.speed_stage2 --simulator mujoco --device cuda:0 --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization --work-dir logs/speed_stage2_piplus_22dof/smoke_20260805_1050 --save-every 1`
-
-## 2026-08-05 11:19 UTC - PiPlus 22DoF dynamic ONNX decoder validation
-
-- Adjustment: The frozen ONNX export annotated batch size as one although its graph is batch-safe. The decoder now rewrites only the input/output batch annotations in memory and executes one batched ONNX call per simulator step; the checkpoint file is unchanged.
-- Result: Batch-16 output matches the original per-row export with max absolute error 1.56e-7. CPU decoder latency was 24 ms, 41 ms, and 99 ms for batches 32, 128, and 256. The post-change one-environment MuJoCo PPO smoke completed and saved a checkpoint.
-- Backend constraint: This repository's MuJoCo wrapper supports only one environment. It now fails clearly for a larger value; vectorized and four-GPU training must use headless Isaac Sim. A local two-environment Isaac Sim startup allocated GPU context but did not finish initialization after six minutes, so it was stopped and remains unverified.
-
-## 2026-08-05 12:19 UTC - PiPlus 22DoF Isaac Sim Vulkan failure isolation
-
-- Context: Headless `speed_stage2` validation for the PiPlus_S_12L8A0G2H0W command-encoder experiment. Four-rank preflight had previously reached `ERROR_DEVICE_LOST`; rank mapping was corrected so each AppLauncher retained its own `LOCAL_RANK` and used `cuda:0` through `cuda:3`.
-- Controlled test: Single process, `--simulator isaacsim --device cuda:0 --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization`; output `logs/speed_stage2_piplus_22dof/smoke_isaacsim_single_20260805_1215/launcher.log`.
-- Result: Isaac Sim initialized, created one environment, and loaded all 869 motions. At about 26 seconds the Vulkan backend emitted `VkResult: ERROR_DEVICE_LOST`; NVIDIA Aftermath wrote `kit_20260805_121935-0.nv-gpudmp`. No rollout, PPO update, or checkpoint occurred. `SIGTERM` did not terminate Kit and `SIGKILL` was required; GPU memory subsequently returned to zero.
-- Further isolation: Updated the shared Isaac launcher to disable Kit renderer multi-GPU (`enabled=false`, `autoEnable=false`, `maxGpuCount=1`). The subsequent one-GPU run marked only GPU 0 Active, but still emitted the same error after about 19 seconds and wrote `kit_20260805_122313-0.nv-gpudmp`. Keep this launcher guard because it prevents an independent multi-GPU renderer from contending with torchrun workers.
-- Conclusion: The failure reproduces with one GPU and one environment even after renderer multi-GPU isolation, so do not attribute it to DDP rank selection, four-GPU contention, the decoder, PPO, or Kit renderer multi-GPU. H20 does not support `nvidia-smi --gpu-reset`; restore a healthy Isaac Sim/Vulkan context through the container/host before retrying the single-process command. Do not launch the four-GPU command until this passes.
-
-## 2026-08-05 12:36 UTC - PiPlus 22DoF four-GPU DDP MuJoCo smoke
-
-- Context: Isaac Sim remains unavailable in this container: the repository scene and official Isaac Lab `create_empty.py` both fail to complete normally. Used MuJoCo only to verify the distributed training contract, not as a replacement for vectorized Isaac Sim rollout.
-- Command: `torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 --simulator mujoco --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization --save-every 1 --work-dir logs/speed_stage2_piplus_22dof/smoke_4gpu_mujoco_20260805_1245` with `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`.
-- Result: Ranks independently ran on `cuda:0`, `cuda:1`, `cuda:2`, and `cuda:3`, each sampled a different H0W motion, completed the frozen 22DoF ONNX decoder action, PPO update, and distributed gradient/metric synchronization. Rank 0 saved a loadable `checkpoint_1.pt` (iteration=1, z_dim=256, encoder_input_dim=363, AMP=false). Reduced metrics: reward_mean=0.47984, vx MAE=0.45559, vy MAE=0.31655, yaw-rate MAE=5.25455, termination_rate=0, value_loss=0.40244.
-- Conclusion: Four-GPU command-encoder/decoder/PPO/DDP integration smoke passes. MuJoCo has one environment per rank and CPU physics, so do not use this as a throughput or gait-quality result; keep the required production preflight as the Isaac Sim command after the platform fault is repaired.
-
-## 2026-08-05 13:01 UTC - PiPlus 22DoF Isaac Sim vectorized DDP smoke and full run
-
-- Adjustment: Added `--sim-device` to separate Isaac PhysX from the CUDA PPO device, disabled Fabric in Isaac `SimulationCfg`, and forwarded optional Kit arguments. The H20 GPU PhysX/Vulkan path remains unstable, so CPU PhysX plus the software Vulkan ICD is used for headless Kit startup.
-- Smoke command: `CUDA_VISIBLE_DEVICES=0,1,2,3 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 --device cuda --sim-device cpu --simulator isaacsim --num-envs 2 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 2 --disable-domain-randomization --save-every 1 --work-dir logs/speed_stage2_piplus_22dof/smoke_4gpu_isaac_cpu_lvp_20260805_1445 --kit_args='--renderer/enabled=pxr --app/vulkan=false'`.
-- Result: All four ranks loaded two Isaac Sim environments, completed rollout/PPO/NCCL synchronization, and rank0 wrote `checkpoint_1.pt`; reward_mean=0.47226, termination=0, no `DEVICE_LOST`.
-- Full run: PID 689988, four GPUs, 16 env/rank, 32 rollout steps, 5 PPO epochs, 10000 iterations, checkpoint every 100; output `logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505`. `checkpoint_100.pt` was written successfully; iteration 100 metrics were reward_mean=0.9888, vx/vy/yaw MAE=0.1479/0.1532/0.3750, termination=0, and iteration 102 was still active at verification.
+- Context: GPU11 Stage2 run `amp_stage2_piplus_lse_2gpu_4096env_1m_yaw_footclearance_resume18700_20260804`; best stable window was around iterations 19000-20000, followed by yaw and velocity tracking regression after 20500. Latest observed window had nonzero yaw MAE about 0.261, yaw correlation 0.813, yaw slope 0.879, and termination/fall/crash rates near zero.
+- Analysis: Existing exponential tracking terms become weak when the policy initially moves in the wrong direction, especially for negative `vx`; the existing projection term is not normalized by target magnitude. Stability and PPO health do not justify changing termination or optimizer settings.
+- Adjustment: Added bounded signed `backward_velocity_progress` (weight 0.9, active for `vx < -0.05`) and `turn_rate_progress` (weight 0.65, active for `|wz| >= 0.1`). Both normalize achieved signed speed by target magnitude and clamp to `[-1, 1]`; existing exponential, projection, AMP, and stability terms are unchanged.
+- Rationale: Supply a dense gradient for reverse-direction and yaw response while keeping the maximum added contribution small (`dt * weight`) and preserving checkpoint tensor compatibility.
+- Expected effect: Lower `tracking/vx_bin_backward_mae` and `tracking/nonzero_yaw_rate_mae`, raise yaw command correlation/response slope, with termination/fall/crash rates remaining near zero.
+- Planned action: Upload `humanoidverse/amp_stage2.py` and the current merged expert dataset to GPU11, stop the current lineage, and resume from the stable `checkpoint_19500.pt` on GPUs 0 and 1.

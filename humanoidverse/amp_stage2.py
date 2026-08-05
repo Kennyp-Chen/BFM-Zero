@@ -11,13 +11,11 @@ is trained with the PiPlus MSELoss plus gradient-penalty objective on motion fea
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import math
 import os
 import subprocess
 import sys
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,9 +42,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BFM_CHECKPOINT = str(
     PROJECT_ROOT / "huiying" / "bfmzero-piplus-lse-isaac-20260715_143758(1)" / "checkpoint"
 )
-DEFAULT_EXPERT_DATASET = str(PROJECT_ROOT / "dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run.pkl")
+DEFAULT_EXPERT_DATASET = str(PROJECT_ROOT / "dataset/pi_LSE_lafan_260706/piplus_lse_lafan_10s-clipped_run_with_stand.pkl")
 DEFAULT_ROBOT_CONFIG = str(PROJECT_ROOT / "humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H1W_LSE.yaml")
-DEFAULT_TEACHER_POLICY = str(PROJECT_ROOT / "0803陈建宏23dof2.zip")
 DEFAULT_KEY_BODIES = (
     "l_ankle_roll_link",
     "r_ankle_roll_link",
@@ -55,63 +52,11 @@ DEFAULT_KEY_BODIES = (
     "r_elbow_link",
     "head_pitch_link",
 )
-ENCODER_INPUT_TRANSFORM_VERSION = 2
+ENCODER_INPUT_TRANSFORM_VERSION = 1
 ENCODER_COMMAND_SCALE = (1.25, 5.0, 1.25)
 ENCODER_DOF_VEL_SCALE = 0.05
 LINVEL_EXP_ERROR_SCALE = 0.16
 MOVING_COMMAND_THRESHOLD = 0.1
-TEACHER_POLICY_INPUT_DIM = 78
-TEACHER_POLICY_ACTION_DIM = 23
-TEACHER_POLICY_ACTION_SCALES = (
-    0.09586094426291411,
-    0.09586094426291411,
-    0.14246510636688653,
-    0.09586094426291411,
-    0.09586094426291411,
-    0.09614231747988017,
-    0.15381525329142837,
-    0.15381525329142837,
-    0.09586094426291411,
-    0.09586094426291411,
-    0.09614231747988017,
-    0.15381525329142837,
-    0.15381525329142837,
-    0.09586094426291411,
-    0.09586094426291411,
-    0.15381525329142837,
-    0.15381525329142837,
-    0.09586094426291411,
-    0.09586094426291411,
-    0.15381525329142837,
-    0.15381525329142837,
-    0.09586094426291411,
-    0.09586094426291411,
-)
-TEACHER_POLICY_JOINT_NAMES = (
-    "l_hip_pitch_joint",
-    "r_hip_pitch_joint",
-    "waist_yaw_joint",
-    "l_hip_roll_joint",
-    "r_hip_roll_joint",
-    "head_yaw_joint",
-    "l_shoulder_pitch_joint",
-    "r_shoulder_pitch_joint",
-    "l_thigh_joint",
-    "r_thigh_joint",
-    "head_pitch_joint",
-    "l_shoulder_roll_joint",
-    "r_shoulder_roll_joint",
-    "l_calf_joint",
-    "r_calf_joint",
-    "l_upper_arm_joint",
-    "r_upper_arm_joint",
-    "l_ankle_pitch_joint",
-    "r_ankle_pitch_joint",
-    "l_elbow_joint",
-    "r_elbow_joint",
-    "l_ankle_roll_joint",
-    "r_ankle_roll_joint",
-)
 
 
 def _distributed_ready() -> bool:
@@ -173,232 +118,6 @@ def _quat_rotate_inverse_np(quat_xyzw: np.ndarray, vectors: np.ndarray) -> np.nd
         axis=-1,
     ).reshape(quat.shape[:-1] + (3, 3))
     return np.einsum("nij,nj->ni", rotation.transpose(0, 2, 1), vec)
-
-
-def _artifact_member(archive: zipfile.ZipFile, suffix: str) -> bytes:
-    matches = [name for name in archive.namelist() if name.endswith(suffix)]
-    if len(matches) != 1:
-        raise ValueError(f"Expected exactly one {suffix!r} in teacher archive, found {matches}")
-    return archive.read(matches[0])
-
-
-class PiPlusAMPTeacherPolicy(nn.Module):
-    """Batched PyTorch copy of the supplied 23DoF AMP ONNX teacher."""
-
-    def __init__(self, artifact_path: str | Path, device: torch.device) -> None:
-        super().__init__()
-        artifact = Path(artifact_path).expanduser().resolve()
-        if artifact.is_dir():
-            actor_bytes = (artifact / "exported/actor.onnx").read_bytes()
-            normalizer_bytes = (artifact / "exported/policy_normalizer.npz").read_bytes()
-        elif artifact.suffix.lower() == ".zip":
-            with zipfile.ZipFile(artifact) as archive:
-                actor_bytes = _artifact_member(archive, "exported/actor.onnx")
-                normalizer_bytes = _artifact_member(archive, "exported/policy_normalizer.npz")
-        else:
-            raise ValueError(f"Teacher policy must be a directory or .zip archive, got {artifact}")
-
-        import onnx
-        from onnx import numpy_helper
-
-        onnx_model = onnx.load_model_from_string(actor_bytes)
-        initializers = {item.name: numpy_helper.to_array(item) for item in onnx_model.graph.initializer}
-        layers: list[nn.Module] = []
-        for node in onnx_model.graph.node:
-            if node.op_type == "Gemm":
-                weight = np.asarray(initializers[node.input[1]], dtype=np.float32).copy()
-                bias = np.asarray(initializers[node.input[2]], dtype=np.float32).copy()
-                attributes = {item.name: item for item in node.attribute}
-                if attributes.get("transB") is None or not int(attributes["transB"].i):
-                    weight = weight.T
-                linear = nn.Linear(weight.shape[1], weight.shape[0])
-                linear.weight.data.copy_(torch.from_numpy(weight))
-                linear.bias.data.copy_(torch.from_numpy(bias))
-                layers.append(linear)
-            elif node.op_type == "Elu":
-                alpha = 1.0
-                for attribute in node.attribute:
-                    if attribute.name == "alpha":
-                        alpha = float(attribute.f)
-                layers.append(nn.ELU(alpha=alpha))
-            else:
-                raise ValueError(f"Unsupported operator {node.op_type!r} in teacher actor.onnx")
-        if not layers or not isinstance(layers[0], nn.Linear) or layers[0].in_features != TEACHER_POLICY_INPUT_DIM:
-            raise ValueError("Teacher actor.onnx does not expose the expected 78-D input")
-        if not isinstance(layers[-1], nn.Linear) or layers[-1].out_features != TEACHER_POLICY_ACTION_DIM:
-            raise ValueError("Teacher actor.onnx does not expose the expected 23-D action output")
-        self.net = nn.Sequential(*layers).to(device=device, dtype=torch.float32).eval()
-        with np.load(io.BytesIO(normalizer_bytes), allow_pickle=False) as data:
-            mean = np.asarray(data["mean"], dtype=np.float32).reshape(1, -1)
-            std = np.asarray(data["std"], dtype=np.float32).reshape(1, -1)
-            eps = float(data["eps"]) if "eps" in data.files else 1.0e-2
-        if mean.shape != (1, TEACHER_POLICY_INPUT_DIM) or std.shape != mean.shape:
-            raise ValueError(f"Teacher normalizer must be [1, {TEACHER_POLICY_INPUT_DIM}], got {mean.shape}/{std.shape}")
-        self.register_buffer("normalizer_mean", torch.from_numpy(mean).to(device))
-        self.register_buffer("normalizer_std", torch.from_numpy(std).to(device))
-        self.normalizer_eps = eps
-        self.artifact_path = str(artifact)
-        for parameter in self.parameters():
-            parameter.requires_grad_(False)
-
-    def normalize(self, observation: torch.Tensor) -> torch.Tensor:
-        if observation.ndim != 2 or observation.shape[-1] != TEACHER_POLICY_INPUT_DIM:
-            raise ValueError(
-                f"Teacher observation must have shape [batch, {TEACHER_POLICY_INPUT_DIM}], got {tuple(observation.shape)}"
-            )
-        return (observation - self.normalizer_mean.to(observation)) / (self.normalizer_std.to(observation) + self.normalizer_eps)
-
-    def forward(self, observation: torch.Tensor) -> torch.Tensor:
-        return self.net(self.normalize(observation))
-
-
-def _joint_permutation(source_names: tuple[str, ...], target_names: tuple[str, ...]) -> torch.Tensor:
-    source_index = {name: index for index, name in enumerate(source_names)}
-    missing = [name for name in target_names if name not in source_index]
-    extra = [name for name in source_names if name not in set(target_names)]
-    if missing or extra or len(source_names) != len(target_names):
-        raise ValueError(f"Joint contract mismatch: missing={missing}, extra={extra}")
-    return torch.tensor([source_index[name] for name in target_names], dtype=torch.long)
-
-
-def _reorder_joint_values(
-    values: torch.Tensor,
-    source_names: tuple[str, ...],
-    target_names: tuple[str, ...],
-) -> torch.Tensor:
-    permutation = _joint_permutation(source_names, target_names).to(values.device)
-    return values.index_select(-1, permutation)
-
-
-def _joint_control_group(joint_name: str) -> str:
-    for group in (
-        "hip_pitch",
-        "hip_roll",
-        "thigh",
-        "calf",
-        "ankle_pitch",
-        "ankle_roll",
-        "waist_yaw",
-        "head_yaw",
-        "head_pitch",
-        "shoulder_pitch",
-        "shoulder_roll",
-        "upper_arm",
-        "elbow",
-    ):
-        if group in joint_name:
-            return group
-    raise ValueError(f"Cannot infer PiPlus control group from joint {joint_name!r}")
-
-
-def _bfm_action_position_scales(robot_config: str | Path) -> tuple[float, ...]:
-    """Return nominal physical joint-position offsets per unit BFM action."""
-    from omegaconf import OmegaConf
-
-    config = OmegaConf.load(Path(robot_config).expanduser().resolve())
-    robot_cfg = config.robot
-    control = robot_cfg.control
-    if str(control.control_type).upper() != "P":
-        raise ValueError(f"Stage2 action contract requires position control, got {control.control_type!r}")
-    action_scale = float(control.action_scale)
-    normalize_from = float(control.get("normalize_action_from", 1.0))
-    normalize_to = float(control.get("normalize_action_to", 1.0))
-    normalize_ratio = normalize_to / normalize_from if bool(control.get("normalize_action", False)) else 1.0
-    dof_names = tuple(str(name) for name in robot_cfg.dof_names)
-    effort_limits = tuple(float(value) for value in robot_cfg.dof_effort_limit_list)
-    if len(dof_names) != len(effort_limits):
-        raise ValueError("PiPlus dof_names and dof_effort_limit_list have different lengths")
-    stiffness = {str(key): float(value) for key, value in control.stiffness.items()}
-    scales = []
-    for joint_name, effort_limit in zip(dof_names, effort_limits):
-        group = _joint_control_group(joint_name)
-        scales.append(normalize_ratio * action_scale * effort_limit / stiffness[group])
-    return tuple(scales)
-
-
-def build_teacher_policy_observation(
-    obs: Mapping[str, torch.Tensor],
-    commands: torch.Tensor,
-    stage2_joint_names: tuple[str, ...],
-    *,
-    teacher_action_scales: torch.Tensor | None = None,
-    bfm_action_scales: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Construct the teacher's exact 78-D policy observation from Stage2 state."""
-    state = obs["state"]
-    last_action = obs.get("last_action")
-    dof_dim = len(stage2_joint_names)
-    if dof_dim != TEACHER_POLICY_ACTION_DIM or state.shape[-1] != 2 * dof_dim + 6:
-        raise ValueError(f"Expected PiPlus state [{2 * dof_dim + 6}] and 23 joints, got {tuple(state.shape)}")
-    if last_action is None or last_action.shape[-1] != dof_dim:
-        raise ValueError("Teacher observation construction requires a 23-D last_action")
-    if commands.shape[-1] != 3:
-        raise ValueError(f"Expected 3 velocity commands, got {commands.shape[-1]}")
-
-    dof_pos = state[..., :dof_dim]
-    dof_vel = state[..., dof_dim : 2 * dof_dim]
-    projected_gravity = state[..., 2 * dof_dim : 2 * dof_dim + 3]
-    base_ang_vel = state[..., 2 * dof_dim + 3 :]
-    teacher_pos = _reorder_joint_values(dof_pos, stage2_joint_names, TEACHER_POLICY_JOINT_NAMES)
-    # BFM's raw state stores dof velocity at scale 1.0; the supplied teacher
-    # policy's observation contract uses the IsaacLab joint-velocity scale 0.05.
-    teacher_vel = _reorder_joint_values(dof_vel, stage2_joint_names, TEACHER_POLICY_JOINT_NAMES) * ENCODER_DOF_VEL_SCALE
-    teacher_action = _reorder_joint_values(last_action, stage2_joint_names, TEACHER_POLICY_JOINT_NAMES)
-    if (teacher_action_scales is None) != (bfm_action_scales is None):
-        raise ValueError("teacher_action_scales and bfm_action_scales must be provided together")
-    if teacher_action_scales is not None and bfm_action_scales is not None:
-        teacher_scales = teacher_action_scales.to(device=teacher_action.device, dtype=teacher_action.dtype)
-        bfm_scales = _reorder_joint_values(
-            bfm_action_scales.to(device=last_action.device, dtype=last_action.dtype).reshape(1, -1),
-            stage2_joint_names,
-            TEACHER_POLICY_JOINT_NAMES,
-        ).reshape(-1)
-        teacher_action = teacher_action * bfm_scales / teacher_scales.clamp_min(1.0e-8)
-    return torch.cat(
-        [base_ang_vel, projected_gravity, commands, teacher_pos, teacher_vel, teacher_action], dim=-1
-    )
-
-
-def teacher_encoder_observation(
-    obs: Mapping[str, torch.Tensor],
-    commands: torch.Tensor,
-    stage2_joint_names: tuple[str, ...],
-    teacher: PiPlusAMPTeacherPolicy,
-    *,
-    teacher_action_scales: torch.Tensor | None = None,
-    bfm_action_scales: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return teacher.normalize(
-        build_teacher_policy_observation(
-            obs,
-            commands,
-            stage2_joint_names,
-            teacher_action_scales=teacher_action_scales,
-            bfm_action_scales=bfm_action_scales,
-        )
-    )
-
-
-def teacher_action_to_stage2(
-    teacher_action: torch.Tensor,
-    stage2_joint_names: tuple[str, ...],
-) -> torch.Tensor:
-    if teacher_action.shape[-1] != TEACHER_POLICY_ACTION_DIM:
-        raise ValueError(f"Expected teacher action dimension {TEACHER_POLICY_ACTION_DIM}, got {teacher_action.shape[-1]}")
-    return _reorder_joint_values(teacher_action, TEACHER_POLICY_JOINT_NAMES, stage2_joint_names)
-
-
-def teacher_action_target_to_stage2(
-    teacher_action: torch.Tensor,
-    stage2_joint_names: tuple[str, ...],
-    *,
-    teacher_action_scales: torch.Tensor,
-) -> torch.Tensor:
-    """Convert teacher policy outputs to physical joint-position offsets in Stage2 order."""
-    if teacher_action.shape[-1] != TEACHER_POLICY_ACTION_DIM:
-        raise ValueError(f"Expected teacher action dimension {TEACHER_POLICY_ACTION_DIM}, got {teacher_action.shape[-1]}")
-    scales = teacher_action_scales.to(device=teacher_action.device, dtype=teacher_action.dtype)
-    return _reorder_joint_values(teacher_action * scales, TEACHER_POLICY_JOINT_NAMES, stage2_joint_names)
 
 
 def _policy_dof_from_motion(motion: Mapping[str, Any], policy_joint_names: tuple[str, ...]) -> np.ndarray:
@@ -924,15 +643,7 @@ def load_command_encoder_policy_state(
     Returns True when the first layer was reparameterized. Its optimizer state
     must then be reset because the stored Adam moments use the old coordinates.
     """
-    checkpoint_policy = checkpoint["policy"]
-    checkpoint_first_layer = checkpoint_policy.get("trunk.0.weight")
-    if checkpoint_first_layer is not None and checkpoint_first_layer.shape[1] != policy.trunk[0].in_features:
-        raise ValueError(
-            "Stage2 checkpoint command encoder input dimension does not match the current layout: "
-            f"checkpoint={checkpoint_first_layer.shape[1]}, current={policy.trunk[0].in_features}. "
-            "The teacher-distillation layout is new; restart from the frozen BFM checkpoint."
-        )
-    policy.load_state_dict(checkpoint_policy)
+    policy.load_state_dict(checkpoint["policy"])
     metadata = checkpoint.get("metadata", {})
     transform = metadata.get("encoder_input_transform", {}) if isinstance(metadata, Mapping) else {}
     version = int(transform.get("version", 0)) if isinstance(transform, Mapping) else 0
@@ -1016,9 +727,6 @@ def compute_gae(
 @dataclass
 class Stage2Rollout:
     encoder_features: torch.Tensor
-    bfm_observations: dict[str, torch.Tensor]
-    teacher_actions: torch.Tensor
-    teacher_action_targets: torch.Tensor
     commands: torch.Tensor
     raw_z: torch.Tensor
     old_log_prob: torch.Tensor
@@ -1198,18 +906,24 @@ MIMICLITE_LOCOMOTION_WEIGHTS = {
     # Increase signed direction/yaw gradients after the widened command run
     # plateaued while preserving the baseline-normalized reward semantics.
     "linvel_projection": 1.5,
-    "angvel_z_exp": 2.6,
+    # Pure yaw commands are sampled explicitly, so make their tracking signal
+    # strong enough to produce a visible turning response at playback time.
+    "angvel_z_exp": 3.4,
+    # These bounded, signed progress terms retain a useful gradient while the
+    # exponential tracking terms are near zero for initially wrong-way motion.
+    "backward_velocity_progress": 0.9,
+    "turn_rate_progress": 0.65,
     "single_foot_contact": 0.85,
     "angvel_xy_l2": 0.035,
     "body_upright": 1.1,
     # Match HT_lab_pipeline's PiPlus locomotion stand_still term: its positive
     # L1 pose error with weight -0.8 is represented here as a negative term.
     "stand_still": 0.8,
-    "feet_air_time": 2.0,
+    "feet_air_time": 2.5,
     # Reward a single swing foot for clearing the ground without encouraging
     # double-support jumps.  The simulator foot contact threshold is 0.07 m,
     # so this target leaves a small but visible clearance margin.
-    "feet_clearance": 1.0,
+    "feet_clearance": 2.0,
     "energy_l1": 2.0e-4,
     "joint_acc_l2": 1.0e-7,
     "action_rate_l2": 0.005,
@@ -1218,8 +932,10 @@ MIMICLITE_LOCOMOTION_WEIGHTS = {
     "joint_deviation_l2": 0.11,
 }
 
-FEET_CLEARANCE_TARGET = 0.10
-FEET_CLEARANCE_SIGMA = 0.04
+FEET_CLEARANCE_TARGET = 0.13
+FEET_CLEARANCE_SIGMA = 0.05
+BACKWARD_COMMAND_THRESHOLD = -0.05
+TURN_COMMAND_THRESHOLD = 0.1
 
 
 def baseline_normalized_linvel_reward(
@@ -1250,6 +966,19 @@ def baseline_normalized_angvel_reward(
     command_z = commands[..., 2]
     tracking_error = (base_ang_vel_z - command_z).square()
     return torch.exp(-tracking_error / error_scale)
+
+
+def directional_progress_reward(
+    achieved: torch.Tensor,
+    commands: torch.Tensor,
+    *,
+    minimum_target: float,
+    active: torch.Tensor,
+) -> torch.Tensor:
+    """Return bounded signed command progress only where the command is active."""
+    target_magnitude = commands.abs().clamp_min(minimum_target)
+    progress = (achieved * commands.sign() / target_magnitude).clamp(-1.0, 1.0)
+    return torch.where(active, progress, torch.zeros_like(progress))
 
 
 def amp_quadratic_reward(discriminator_score: torch.Tensor) -> torch.Tensor:
@@ -1419,6 +1148,18 @@ class MimicLiteLocomotionRewardState:
         linvel_exp = baseline_normalized_linvel_reward(core.base_lin_vel, commands)
         linvel_projection = (core.base_lin_vel[:, :2] * commands[:, :2]).sum(dim=-1).clamp_max(command_speed)
         angvel_z_exp = baseline_normalized_angvel_reward(core.base_ang_vel[:, 2], commands)
+        backward_velocity_progress = directional_progress_reward(
+            core.base_lin_vel[:, 0],
+            commands[:, 0],
+            minimum_target=0.15,
+            active=commands[:, 0] < BACKWARD_COMMAND_THRESHOLD,
+        )
+        turn_rate_progress = directional_progress_reward(
+            core.base_ang_vel[:, 2],
+            commands[:, 2],
+            minimum_target=0.15,
+            active=commands[:, 2].abs() >= TURN_COMMAND_THRESHOLD,
+        )
 
         down = torch.zeros(core.num_envs, 3, device=core.device)
         down[:, 2] = -1.0
@@ -1457,6 +1198,8 @@ class MimicLiteLocomotionRewardState:
             "linvel_exp": linvel_exp,
             "linvel_projection": linvel_projection,
             "angvel_z_exp": angvel_z_exp,
+            "backward_velocity_progress": backward_velocity_progress,
+            "turn_rate_progress": turn_rate_progress,
             "single_foot_contact": single_contact,
             "angvel_xy_l2": angvel_xy_l2,
             "body_upright": body_upright,
@@ -1519,7 +1262,6 @@ def _load_piplus_robot_contract(robot_config: str | Path) -> SimpleNamespace:
     return SimpleNamespace(
         config_path=config_path,
         policy_joint_names=joint_names,
-        bfm_action_position_scales=_bfm_action_position_scales(config_path),
         fixed_joint_names=(),
         robot=SimpleNamespace(
             base_body="base_link",
@@ -1631,9 +1373,6 @@ def ppo_update(
     optimizer: torch.optim.Optimizer,
     max_grad_norm: float,
     target_kl: float | None = 0.01,
-    bfm_model=None,
-    action_imitation_coef: float = 0.0,
-    bfm_action_position_scales: torch.Tensor | None = None,
 ) -> dict[str, float]:
     features = rollout.encoder_features.reshape(-1, rollout.encoder_features.shape[-1])
     raw_z = rollout.raw_z.reshape(-1, rollout.raw_z.shape[-1])
@@ -1641,22 +1380,6 @@ def ppo_update(
     advantages = advantages.reshape(-1)
     returns = returns.reshape(-1)
     advantages = (advantages - advantages.mean()) / advantages.std().clamp_min(1.0e-6)
-    if action_imitation_coef < 0.0:
-        raise ValueError(f"action_imitation_coef must be non-negative, got {action_imitation_coef}")
-    imitation_enabled = action_imitation_coef > 0.0
-    if imitation_enabled:
-        if bfm_model is None:
-            raise ValueError("bfm_model is required when action imitation is enabled")
-        bfm_observations = {
-            key: value.reshape(-1, value.shape[-1]) for key, value in rollout.bfm_observations.items()
-        }
-        teacher_action_targets = rollout.teacher_action_targets.reshape(
-            -1, rollout.teacher_action_targets.shape[-1]
-        )
-        if bfm_action_position_scales is None:
-            raise ValueError("bfm_action_position_scales is required when action imitation is enabled")
-        if not bfm_observations or teacher_action_targets.shape[0] != features.shape[0]:
-            raise ValueError("Action imitation rollout tensors do not match encoder feature count")
 
     metric_sums = {
         "policy_loss": 0.0,
@@ -1668,8 +1391,6 @@ def ppo_update(
         "ratio_max": 0.0,
         "grad_norm": 0.0,
         "raw_z_norm": 0.0,
-        "action_imitation_loss": 0.0,
-        "action_imitation_mae": 0.0,
     }
     update_count = 0
     early_stop = False
@@ -1689,26 +1410,7 @@ def ppo_update(
             clipped = ratio.clamp(1.0 - clip_ratio, 1.0 + clip_ratio) * advantages[indices]
             policy_loss = -torch.minimum(unclipped, clipped).mean()
             value_loss = F.mse_loss(value, returns[indices])
-            action_imitation_loss = features.new_zeros(())
-            action_imitation_mae = features.new_zeros(())
-            if imitation_enabled:
-                mean_z = policy.deterministic_z(features[indices])
-                predicted_action = _bfm_action(
-                    bfm_model,
-                    {key: value[indices] for key, value in bfm_observations.items()},
-                    bfm_model.project_z(mean_z),
-                )
-                bfm_scales = bfm_action_position_scales.to(device=predicted_action.device, dtype=predicted_action.dtype)
-                predicted_offset = predicted_action * bfm_scales
-                target_offset = teacher_action_targets[indices].to(predicted_offset)
-                action_imitation_loss = F.smooth_l1_loss(predicted_offset, target_offset)
-                action_imitation_mae = (predicted_offset - target_offset).abs().mean()
-            loss = (
-                policy_loss
-                + value_coef * value_loss
-                - entropy_coef * entropy
-                + action_imitation_coef * action_imitation_loss
-            )
+            loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             average_gradients(policy.parameters())
@@ -1731,8 +1433,6 @@ def ppo_update(
             metric_sums["ratio_max"] += float(ratio.max().detach())
             metric_sums["grad_norm"] += float(grad_norm.detach())
             metric_sums["raw_z_norm"] += float(raw_z[indices].norm(dim=-1).mean().detach())
-            metric_sums["action_imitation_loss"] += float(action_imitation_loss.detach())
-            metric_sums["action_imitation_mae"] += float(action_imitation_mae.detach())
             update_count += 1
 
             if target_kl is not None and target_kl > 0.0 and float(synced_kl) > 1.5 * target_kl:
@@ -1764,11 +1464,6 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_BFM_CHECKPOINT,
         help="First-stage model checkpoint directory containing config.json and model/.",
     )
-    parser.add_argument(
-        "--teacher-policy",
-        default=DEFAULT_TEACHER_POLICY,
-        help="Chen Jianhong's 23DoF AMP teacher directory or ZIP archive.",
-    )
     parser.add_argument("--expert-dataset", default=DEFAULT_EXPERT_DATASET)
     parser.add_argument("--robot-config", default=DEFAULT_ROBOT_CONFIG)
     parser.add_argument("--device", default="cuda:0")
@@ -1786,7 +1481,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--command-resample-steps", type=int, default=300)
     parser.add_argument("--command-resample-prob", type=float, default=0.75)
     parser.add_argument("--command-stand-prob", type=float, default=0.05)
-    parser.add_argument("--command-turn-prob", type=float, default=0.05)
+    parser.add_argument("--command-turn-prob", type=float, default=0.20)
     parser.add_argument("--command-warmup-steps", type=int, default=20)
     parser.add_argument("--command-smoothing", type=float, default=0.02)
     parser.add_argument("--latent-stat-max-frames", type=int, default=4096, help="Expert frames used for automatic BFM latent validation; 0 means all.")
@@ -1814,15 +1509,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--target-kl", type=float, default=0.04, help="Early-stop PPO epochs after KL exceeds 1.5x this value; <=0 disables.")
     parser.add_argument("--discriminator-learning-rate", type=float, default=1e-4)
     parser.add_argument("--amp-weight", type=float, default=0.25)
-    parser.add_argument(
-        "--action-imitation-coef",
-        type=float,
-        default=1.0,
-        help="Coefficient of the differentiable teacher-action distillation loss.",
-    )
     parser.add_argument("--entropy-coef", type=float, default=0.003)
     parser.add_argument("--env-reward-weight", type=float, default=1.0)
-    parser.add_argument("--locomotion-reward-weight", type=float, default=1.1)
+    parser.add_argument("--locomotion-reward-weight", type=float, default=0.0)
     parser.add_argument("--max-episode-length-s", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--save-every", type=int, default=100)
@@ -1879,9 +1568,6 @@ def _run_dry_validation(args: argparse.Namespace) -> None:
     """Validate all model/data contracts without constructing an Isaac environment."""
     robot_training = _load_piplus_robot_contract(args.robot_config)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    teacher = PiPlusAMPTeacherPolicy(args.teacher_policy, device)
-    stage2_to_teacher = _joint_permutation(tuple(robot_training.policy_joint_names), TEACHER_POLICY_JOINT_NAMES)
-    teacher_to_stage2 = _joint_permutation(TEACHER_POLICY_JOINT_NAMES, tuple(robot_training.policy_joint_names))
     checkpoint = Path(args.bfm_checkpoint).expanduser().resolve()
     bfm_load_device = "cuda" if device.type == "cuda" else "cpu"
     bfm_model = load_model_from_checkpoint_dir(checkpoint, device=bfm_load_device)
@@ -1911,11 +1597,6 @@ def _run_dry_validation(args: argparse.Namespace) -> None:
                 "z_dim": int(bfm_model.cfg.archi.z_dim),
                 "norm_z": bool(bfm_model.cfg.archi.norm_z),
                 "policy_joint_count": len(robot_training.policy_joint_names),
-                "teacher_policy": teacher.artifact_path,
-                "teacher_input_dim": TEACHER_POLICY_INPUT_DIM,
-                "teacher_action_dim": int(teacher.net[-1].out_features),
-                "stage2_to_teacher_joint_permutation": stage2_to_teacher.tolist(),
-                "teacher_to_stage2_joint_permutation": teacher_to_stage2.tolist(),
                 "expert_feature_dim": expert.feature_dim,
                 "expert_motion_count": expert.motion_count,
                 "expert_frame_count": int(expert.features.shape[0]),
@@ -1962,12 +1643,6 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
     bfm_load_device = "cuda" if device.type == "cuda" else "cpu"
     bfm_model = load_model_from_checkpoint_dir(args.bfm_checkpoint, device=bfm_load_device)
     _freeze_bfm(bfm_model)
-    teacher = PiPlusAMPTeacherPolicy(args.teacher_policy, device)
-    stage2_joint_names = tuple(robot_training.policy_joint_names)
-    teacher_action_scales = torch.tensor(TEACHER_POLICY_ACTION_SCALES, device=device)
-    bfm_action_scales = torch.tensor(robot_training.bfm_action_position_scales, device=device)
-    _joint_permutation(stage2_joint_names, TEACHER_POLICY_JOINT_NAMES)
-    _joint_permutation(TEACHER_POLICY_JOINT_NAMES, stage2_joint_names)
     bfm_action_dim = int(getattr(bfm_model, "action_dim", -1))
     env_action_dim = int(env.single_action_space.shape[0])
     if env_action_dim != len(robot_training.policy_joint_names):
@@ -1995,15 +1670,8 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
     commands = torch.zeros(args.num_envs, 3, device=device)
     command_targets = torch.zeros_like(commands)
     command_episode_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)
-    teacher_observation = build_teacher_policy_observation(
-        obs_t,
-        commands,
-        stage2_joint_names,
-        teacher_action_scales=teacher_action_scales,
-        bfm_action_scales=bfm_action_scales,
-    )
-    encoder_input = teacher.normalize(teacher_observation)
-    input_scale = torch.ones(encoder_input.shape[-1], device=device, dtype=encoder_input.dtype)
+    encoder_input = flatten_encoder_observation(obs_t, commands)
+    input_scale = encoder_input_scale(obs_t, commands)
     backward_arch = bfm_model.cfg.archi.b
     policy = CommandEncoderPolicy(
         encoder_input.shape[-1],
@@ -2169,21 +1837,20 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
         "fixed_joint_names": list(robot_training.fixed_joint_names),
         "simulator_control_joint_names": list(robot_training.robot.control_joint_names),
         "encoder_observation_layout": [
-            {"name": "teacher_policy_observation_normalized", "dim": int(encoder_input.shape[-1])},
+            {"name": "command", "dim": int(commands.shape[-1])},
+            {"name": "state", "dim": int(obs_t["state"].shape[-1])},
+            {"name": "last_action", "dim": int(obs_t.get("last_action", obs_t["state"][..., :0]).shape[-1])},
+            *(
+                [{"name": "history_actor", "dim": int(obs_t["history_actor"].shape[-1])}]
+                if "history_actor" in obs_t
+                else []
+            ),
         ],
         "encoder_input_transform": {
             "version": ENCODER_INPUT_TRANSFORM_VERSION,
-            "source": "chenjianhong_amp_teacher_policy_normalizer",
-            "teacher_policy": teacher.artifact_path,
+            "command_scale": list(ENCODER_COMMAND_SCALE),
+            "dof_vel_scale": ENCODER_DOF_VEL_SCALE,
             "legacy_checkpoint_first_layer_migrated": legacy_input_migrated,
-        },
-        "teacher_policy": {
-            "artifact": teacher.artifact_path,
-            "input_dim": TEACHER_POLICY_INPUT_DIM,
-            "action_dim": TEACHER_POLICY_ACTION_DIM,
-            "joint_names": list(TEACHER_POLICY_JOINT_NAMES),
-            "stage2_joint_names": list(stage2_joint_names),
-            "action_target_order": "stage2_environment_order",
         },
         "z_dim": int(bfm_model.cfg.archi.z_dim),
         "backward_hidden_dim": int(backward_arch.hidden_dim),
@@ -2202,7 +1869,6 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
         "amp_reward_mapping": "quad(discriminator_score) -> amp_weight",
         "amp_discriminator_objective": AMP_DISCRIMINATOR_OBJECTIVE,
         "amp_reward_weight": args.amp_weight,
-        "action_imitation_coef": args.action_imitation_coef,
         "env_reward_weight": args.env_reward_weight,
         "locomotion_reward_weight": args.locomotion_reward_weight,
         "locomotion_reward_terms": MIMICLITE_LOCOMOTION_WEIGHTS,
@@ -2248,9 +1914,6 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
     try:
         for iteration in range(start_iteration, args.iterations):
             encoder_features, commands_store, raw_z_store = [], [], []
-            bfm_observations_store = {"state": [], "last_action": [], "history_actor": []}
-            teacher_actions_store = []
-            teacher_action_targets_store = []
             old_log_probs, values_store = [], []
             env_rewards, locomotion_rewards, terminated_store, truncated_store, crash_store, fall_store, timeout_values, amp_features = (
                 [], [], [], [], [], [], [], []
@@ -2261,21 +1924,7 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
             for step in range(args.rollout_steps):
                 with torch.no_grad():
                     obs_t = _to_torch_obs(obs, device)
-                    teacher_observation = build_teacher_policy_observation(
-                        obs_t,
-                        commands,
-                        stage2_joint_names,
-                        teacher_action_scales=teacher_action_scales,
-                        bfm_action_scales=bfm_action_scales,
-                    )
-                    encoder_input = teacher.normalize(teacher_observation)
-                    teacher_action_raw = teacher.net(encoder_input)
-                    teacher_action = teacher_action_to_stage2(teacher_action_raw, stage2_joint_names)
-                    teacher_action_target = teacher_action_target_to_stage2(
-                        teacher_action_raw,
-                        stage2_joint_names,
-                        teacher_action_scales=teacher_action_scales,
-                    )
+                    encoder_input = flatten_encoder_observation(obs_t, commands)
                     raw_z, old_log_prob, value = policy.sample(encoder_input)
                     # Reuse the first-stage FBModel.project_z(); it reads norm_z from the checkpoint config.
                     z = bfm_model.project_z(raw_z)
@@ -2296,25 +1945,13 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
                     terminal_obs = info.get("terminal_observation")
                     if terminal_obs is None:
                         raise RuntimeError("A truncated transition is missing its pre-reset terminal observation")
-                    terminal_obs_t = _to_torch_obs(terminal_obs, device)
-                    terminal_teacher_observation = build_teacher_policy_observation(
-                        terminal_obs_t,
-                        commands,
-                        stage2_joint_names,
-                        teacher_action_scales=teacher_action_scales,
-                        bfm_action_scales=bfm_action_scales,
-                    )
-                    terminal_input = teacher.normalize(terminal_teacher_observation)
+                    terminal_input = flatten_encoder_observation(_to_torch_obs(terminal_obs, device), commands)
                     with torch.no_grad():
                         timeout_value[truncated] = policy(terminal_input)[2][truncated]
                 if torch.any(done):
                     online_history.reset_envs(done.nonzero(as_tuple=False).squeeze(-1), env._env.simulator.dof_pos)
 
                 encoder_features.append(encoder_input.detach())
-                for key in bfm_observations_store:
-                    bfm_observations_store[key].append(obs_t[key].detach())
-                teacher_actions_store.append(teacher_action.detach())
-                teacher_action_targets_store.append(teacher_action_target.detach())
                 commands_store.append(commands.detach())
                 raw_z_store.append(raw_z.detach())
                 old_log_probs.append(old_log_prob.detach())
@@ -2363,9 +2000,6 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
 
             rollout = Stage2Rollout(
                 encoder_features=torch.stack(encoder_features),
-                bfm_observations={key: torch.stack(values) for key, values in bfm_observations_store.items()},
-                teacher_actions=torch.stack(teacher_actions_store),
-                teacher_action_targets=torch.stack(teacher_action_targets_store),
                 commands=torch.stack(commands_store),
                 raw_z=torch.stack(raw_z_store),
                 old_log_prob=torch.stack(old_log_probs),
@@ -2411,15 +2045,7 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
                     + args.amp_weight * amp_reward
                     - args.latent_prior_weight * latent_prior_penalty
                 )
-                next_obs_t = _to_torch_obs(obs, device)
-                next_teacher_observation = build_teacher_policy_observation(
-                    next_obs_t,
-                    commands,
-                    stage2_joint_names,
-                    teacher_action_scales=teacher_action_scales,
-                    bfm_action_scales=bfm_action_scales,
-                )
-                next_input = teacher.normalize(next_teacher_observation)
+                next_input = flatten_encoder_observation(_to_torch_obs(obs, device), commands)
                 next_value = policy(next_input)[2]
                 advantages, returns = compute_gae(
                     rewards,
@@ -2444,9 +2070,6 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
                 optimizer=policy_optimizer,
                 max_grad_norm=1.0,
                 target_kl=args.target_kl,
-                bfm_model=bfm_model,
-                action_imitation_coef=args.action_imitation_coef,
-                bfm_action_position_scales=bfm_action_scales,
             )
             tracking_metrics = command_tracking_metrics(rollout.commands, rollout.base_lin_vel, rollout.base_ang_vel)
             latent_metrics = latent_manifold_metrics(

@@ -7,11 +7,9 @@ import torch
 
 from humanoidverse.amp_stage2 import (
     MIMICLITE_LOCOMOTION_WEIGHTS,
-    TEACHER_POLICY_JOINT_NAMES,
     AMPDiscriminator,
     CommandEncoderPolicy,
     MimicLiteLocomotionRewardState,
-    PiPlusAMPTeacherPolicy,
     _latent_direction_prior,
     _load_piplus_robot_contract,
     _motion_qpos,
@@ -23,7 +21,6 @@ from humanoidverse.amp_stage2 import (
     _transition_core,
     amp_quadratic_reward,
     baseline_normalized_linvel_reward,
-    build_teacher_policy_observation,
     command_tracking_metrics,
     compute_gae,
     encoder_input_scale,
@@ -34,7 +31,6 @@ from humanoidverse.amp_stage2 import (
     project_latent,
     restore_discriminator_optimizer,
     restore_policy_optimizer,
-    teacher_action_to_stage2,
 )
 from humanoidverse.envs.legged_base_task.legged_robot_base import LeggedRobotBase
 
@@ -88,44 +84,6 @@ class AmpStage2Test(unittest.TestCase):
         for index, joint_name in enumerate(joint_names):
             joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
             self.assertEqual(qpos[int(model.jnt_qposadr[joint_id])], float(index))
-
-    def test_teacher_observation_and_action_use_name_mapping(self):
-        contract = _load_piplus_robot_contract(
-            "humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H1W_LSE.yaml"
-        )
-        stage2_names = tuple(contract.policy_joint_names)
-        state = torch.cat(
-            [
-                torch.arange(23, dtype=torch.float32).view(1, 23),
-                (100.0 + torch.arange(23, dtype=torch.float32)).view(1, 23),
-                torch.tensor([[200.0, 201.0, 202.0, 203.0, 204.0, 205.0]]),
-            ],
-            dim=-1,
-        )
-        last_action = (300.0 + torch.arange(23, dtype=torch.float32)).view(1, 23)
-        commands = torch.tensor([[0.4, -0.2, 0.7]])
-        teacher_obs = build_teacher_policy_observation(
-            {"state": state, "last_action": last_action}, commands, stage2_names
-        )
-        self.assertEqual(tuple(teacher_obs.shape), (1, 78))
-        self.assertTrue(torch.equal(teacher_obs[:, :3], torch.tensor([[203.0, 204.0, 205.0]])))
-        self.assertTrue(torch.equal(teacher_obs[:, 3:6], torch.tensor([[200.0, 201.0, 202.0]])))
-        self.assertTrue(torch.equal(teacher_obs[:, 6:9], commands))
-        expected_pos = torch.tensor(
-            [[6.0, 0.0, 12.0, 7.0, 1.0, 21.0, 17.0, 13.0, 8.0, 2.0, 22.0, 18.0, 14.0, 9.0, 3.0, 19.0, 15.0, 10.0, 4.0, 20.0, 16.0, 11.0, 5.0]]
-        )
-        self.assertTrue(torch.equal(teacher_obs[:, 9:32], expected_pos))
-        teacher_action = torch.arange(23, dtype=torch.float32).view(1, 23)
-        stage2_action = teacher_action_to_stage2(teacher_action, stage2_names)
-        self.assertTrue(torch.equal(stage2_action[:, :6], torch.tensor([[1.0, 4.0, 9.0, 14.0, 18.0, 22.0]])))
-
-    def test_teacher_archive_loads_and_is_batched(self):
-        teacher = PiPlusAMPTeacherPolicy("0803陈建宏23dof2.zip", torch.device("cpu"))
-        observation = torch.zeros(4, 78)
-        action = teacher(observation)
-        self.assertEqual(tuple(action.shape), (4, 23))
-        self.assertEqual(len(TEACHER_POLICY_JOINT_NAMES), 23)
-        self.assertTrue(torch.isfinite(action).all())
 
     def test_command_encoder_shapes_and_latent_projection(self):
         policy = CommandEncoderPolicy(input_dim=19, z_dim=8, hidden_dim=32)
