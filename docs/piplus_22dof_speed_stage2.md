@@ -117,14 +117,14 @@ python -m humanoidverse.speed_stage2 \
   --work-dir logs/speed_stage2_piplus_22dof/smoke_manual
 ```
 
-正式向量化训练必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时入口会将每个 worker 的 `CUDA_VISIBLE_DEVICES` 收窄为单张物理 GPU，并分别设置 Omniverse/Isaac cache。该隔离是必要的：若四个 Kit 进程同时看见 0-3 四张卡，会创建跨卡 Vulkan context 并出现 `ERROR_DEVICE_LOST`。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
+正式向量化训练必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时 IsaacLab 用 torchrun 的原始 `LOCAL_RANK=0..3` 选择 0-3 物理 GPU，并分别设置 Omniverse/Isaac cache。不可在 worker 内将 `LOCAL_RANK` 重写为零，否则四个 Kit 实例都会争抢 GPU 0 并出现 `ERROR_DEVICE_LOST`。不要在首四卡预检命令中设置 `CUDA_VISIBLE_DEVICES`，因为 Omniverse Vulkan 与 CUDA 的设备枚举不同，IsaacLab 会对此给出崩溃风险警告。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
 
 ```bash
 cd /root/autodl-tmp/chenyupeng/HT_BFM
 conda activate HT_BFM
 mkdir -p logs/speed_stage2_piplus_22dof/preflight_4gpu
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
 torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 \
   --simulator isaacsim --num-envs 16 --iterations 5 --rollout-steps 8 \
   --ppo-epochs 1 --minibatch-size 128 --disable-domain-randomization \
@@ -135,7 +135,7 @@ torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 \
 只有预检写出 `config.json` 和 `checkpoint_5.pt` 后，才运行长训练。起步建议每卡 256 环境，总计 1024 环境，每轮 32768 samples：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
 torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 \
   --simulator isaacsim --num-envs 256 --iterations 1000000 --rollout-steps 32 \
   --ppo-epochs 5 --minibatch-size 2048 --learning-rate 3e-4 --save-every 100 --seed 4728 \
@@ -197,7 +197,8 @@ python -m humanoidverse.speed_stage2_play \
 | 2026-08-05 11:19 | MuJoCo，1 env，dynamic decoder | PPO smoke 再次成功 | 改造后单环境链路通过 |
 | 2026-08-05 | Isaac Sim，2 env headless | 初始化超过 6 分钟，无训练输出，手动停止 | Isaac 多环境未验证 |
 | 2026-08-05 | Isaac Sim，四卡 preflight | 首次命令 `RUN_DIR` 为空，四个 worker 没有实际输出路径且成为孤儿；已停止 | 命令无效，需用本文件的绝对路径版本重试 |
-| 2026-08-05 | Isaac Sim，四卡 preflight | 修正输出路径后，四个 Kit worker 都可见 GPU 0-3，启动时报告 Vulkan `ERROR_DEVICE_LOST`；无 checkpoint，已停止 | 根因为 worker 未隔离可见 GPU；已迁移 AMP 的 per-worker `CUDA_VISIBLE_DEVICES` 与 cache 隔离，待后台重测 |
+| 2026-08-05 | Isaac Sim，四卡 preflight | 修正输出路径后报告 Vulkan `ERROR_DEVICE_LOST`；无 checkpoint，已停止 | 初始版本的 worker GPU 处理不正确 |
+| 2026-08-05 | Isaac Sim，四卡 GPU 隔离修复尝试 | 日志显示四个 AppLauncher 都是 `cuda:0`，说明将 `LOCAL_RANK` 重写为 0 反而使四个 Kit 争抢 GPU 0；无 checkpoint，已停止 | 保留原始 `LOCAL_RANK`，移除首四卡命令的 `CUDA_VISIBLE_DEVICES`，待后台重测 |
 
 后续记录模板：
 
