@@ -17,6 +17,7 @@ BFM-Zero (LeCAR-Lab) fork for humanoid RL training and AMP stage-2 fine-tuning. 
 - `data_process/` — motion-conversion / dataset-augmentation scripts (piplus/GMR/AMP); generated datasets go to `data_process/dataset` (gitignored).
 - `tests/` — unittest smoke tests for `amp_stage2` / `amp_stage2_play`. They import `humanoidverse.amp_stage2`, so they need the full env (not just MuJoCo).
 - `tuning-log.md` — chronological record of distributed-training tuning on remote machines; append to it when changing training hyperparameters or launching a new run.
+- `docs/piplus_22dof_speed_stage2.md` — authoritative progress record for the PiPlus 22DoF PPO command-encoder experiment. Update this document first for every change, launch, result, or playback observation related to that experiment.
 - `static/`, `model/`, `logs/` (default Hydra `base_dir`), `humanoidverse/data`, `wandb/` are generated artifacts — data, not source.
 
 ## Commands
