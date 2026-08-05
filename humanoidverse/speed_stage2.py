@@ -312,11 +312,13 @@ def build_h0w_locomotion_env(
     *,
     device: str,
     expert_dataset: str,
+    robot_config: str | Path,
     num_envs: int,
     seed: int,
     max_episode_length_s: float,
     simulator: str,
     disable_domain_randomization: bool,
+    isaac_urdf: str | None = None,
 ):
     if simulator not in {"isaacsim", "mujoco"}:
         raise ValueError(f"Unsupported simulator {simulator!r}")
@@ -324,8 +326,23 @@ def build_h0w_locomotion_env(
         raise ValueError("The MuJoCo backend supports only --num-envs 1; use Isaac Sim for vectorized training")
     if not Path(expert_dataset).expanduser().is_file():
         raise FileNotFoundError(f"H0W motion dataset does not exist: {expert_dataset}")
+    from omegaconf import OmegaConf
+
+    robot_config_path = Path(robot_config).expanduser().resolve()
+    if not robot_config_path.is_file():
+        raise FileNotFoundError(f"Robot config does not exist: {robot_config_path}")
+    robot_cfg = OmegaConf.load(robot_config_path).robot
+    asset_root = str(robot_cfg.asset.asset_root)
+    asset_xml = str(robot_cfg.asset.xml_file)
+    motion_asset = robot_cfg.get("motion", {}).get("asset", {})
+    motion_root = str(motion_asset.get("assetRoot", asset_root))
+    motion_xml = str(motion_asset.get("assetFileName", asset_xml))
     overrides = [
         "robot=piplus/PiPlus_S_12L8A0G2H0W",
+        f"robot.asset.asset_root={asset_root}",
+        f"robot.asset.xml_file={asset_xml}",
+        f"robot.motion.asset.assetRoot={motion_root}",
+        f"robot.motion.asset.assetFileName={motion_xml}",
         f"simulator={simulator}",
         f"num_envs={num_envs}",
         f"simulator.config.scene.num_envs={num_envs}",
@@ -337,6 +354,11 @@ def build_h0w_locomotion_env(
         "env.config.termination.terminate_by_low_height=False",
         "env.config.lie_down_init=False",
     ]
+    if isaac_urdf is not None:
+        urdf_path = Path(isaac_urdf).expanduser().resolve()
+        if not urdf_path.is_file():
+            raise FileNotFoundError(f"Isaac Sim URDF does not exist: {urdf_path}")
+        overrides.append(f"robot.asset.urdf_file={urdf_path}")
     config = HumanoidVerseIsaacConfig(
         name="humanoidverse_isaac",
         device=device,
@@ -439,6 +461,11 @@ def _parse_args() -> argparse.Namespace:
         help="package.module:callable receiving (bfm_model_path, decoder_path, device).",
     )
     parser.add_argument("--robot-config", default=str(DEFAULT_ROBOT_CONFIG))
+    parser.add_argument(
+        "--isaac-urdf",
+        default=None,
+        help="Optional Isaac Sim URDF override. Use a no-visual URDF for headless GPU diagnostics; collisions are unchanged.",
+    )
     parser.add_argument("--expert-dataset", default=str(DEFAULT_EXPERT_DATASET))
     parser.add_argument("--validate-assets", action="store_true", help="Validate local H0W asset and BFM state-dict contracts then exit.")
     parser.add_argument("--device", default="cuda:0")
@@ -523,11 +550,13 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
     env = build_h0w_locomotion_env(
         device=sim_device,
         expert_dataset=args.expert_dataset,
+        robot_config=args.robot_config,
         num_envs=args.num_envs,
         seed=args.seed,
         max_episode_length_s=args.max_episode_length_s,
         simulator=args.simulator,
         disable_domain_randomization=args.disable_domain_randomization,
+        isaac_urdf=args.isaac_urdf,
     )
     try:
         obs, _ = env.reset(to_numpy=False)

@@ -380,3 +380,15 @@ Git commit：
 - 下一步门禁：请目录所有者对 `/root/autodl-tmp/zhuzejian` 开放至少 `r-x` 权限后，再核对其 Isaac Sim
   版本、`isaaclab.sh`/启动器参数、资产路径和环境变量；在此之前不把 UFO/MJLab 的 MuJoCo 结果当成
   Isaac Sim 兼容性证据，也不恢复 GPU PhysX 训练。
+
+## 2026-08-05 - 本地资产路径修复与 GPU 状态复核
+
+- 修正 `speed_stage2.py`：`--robot-config` 现在同时驱动 Hydra 的 `robot.asset` 和 `robot.motion.asset`，不再
+  只用于契约校验；`--isaac-urdf` 仍可覆盖 Isaac Sim 使用的 URDF。使用仓库内置 XML 和 no-visual URDF 的
+  MuJoCo 单步 smoke 成功，`reward_mean=0.01768`，说明该路径修复没有破坏 PPO 链路。
+- Isaac Sim GPU no-visual smoke 已通过资产校验并加载 `869 motions`，但约 22 秒后仍生成
+  `kit_20260805_152847-0.nv-gpudmp`，随后报 `VkResult: ERROR_DEVICE_LOST`。因此视觉 STL 不是根因。
+- 随后的官方 Cartpole articulation probe 在设置 `CUDA_VISIBLE_DEVICES=0` 后反复报告
+  `Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA H20`；执行 `nvidia-smi --gpu-reset -i 0` 返回
+  `Insufficient Permissions`。需要管理员执行 GPU reset 或重启容器/节点后，才能进行下一次原生 GPU smoke。
+- 当前不再启动 GPU PhysX 训练；CPU PhysX + software Vulkan 的 checkpoint `1400` 保留为可恢复实验结果。
