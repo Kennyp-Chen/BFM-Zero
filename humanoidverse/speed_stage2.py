@@ -442,7 +442,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--expert-dataset", default=str(DEFAULT_EXPERT_DATASET))
     parser.add_argument("--validate-assets", action="store_true", help="Validate local H0W asset and BFM state-dict contracts then exit.")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--sim-device",
+        default=None,
+        help="Isaac Sim device; defaults to --device. Use cpu to avoid GPU PhysX/Vulkan issues while keeping PPO on CUDA.",
+    )
     parser.add_argument("--simulator", choices=("isaacsim", "mujoco"), default="isaacsim")
+    # Forward optional IsaacLab/Kit settings for headless runtime diagnostics.
+    parser.add_argument("--kit_args", default="")
     parser.add_argument("--work-dir", default=str(DEFAULT_WORK_DIR))
     parser.add_argument("--resume", default=None)
     parser.add_argument("--num-envs", type=int, default=64)
@@ -512,8 +519,9 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
     decoder = _load_decoder(Path(args.bfm_model).expanduser().absolute(), decoder_path, args.decoder_factory, device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    sim_device = args.sim_device or args.device
     env = build_h0w_locomotion_env(
-        device=args.device,
+        device=sim_device,
         expert_dataset=args.expert_dataset,
         num_envs=args.num_envs,
         seed=args.seed,
@@ -559,9 +567,14 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
                 with torch.no_grad():
                     raw_z, log_prob, value = policy.sample(features)
                     action = decoder.act(obs_t, decoder.project_z(raw_z), mean=True)
-                next_obs, environment_reward, terminated, truncated, info = env.step(action, to_numpy=False)
+                next_obs, environment_reward, terminated, truncated, info = env.step(action.to(env.device), to_numpy=False)
                 core = _transition_core(env._env, info)
-                speed_reward, _ = speed_tracking_reward(core.base_lin_vel, core.base_ang_vel, commands)
+                base_lin_vel = core.base_lin_vel.to(device)
+                base_ang_vel = core.base_ang_vel.to(device)
+                terminated = terminated.to(device)
+                truncated = truncated.to(device)
+                environment_reward = environment_reward.to(device)
+                speed_reward, _ = speed_tracking_reward(base_lin_vel, base_ang_vel, commands)
                 reward = speed_reward + args.env_reward_weight * environment_reward
                 rollout_parts.append(
                     {
@@ -573,8 +586,8 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
                         "terminated": terminated,
                         "truncated": truncated,
                         "commands": commands,
-                        "base_lin_vel": core.base_lin_vel.detach().clone(),
-                        "base_ang_vel": core.base_ang_vel.detach().clone(),
+                        "base_lin_vel": base_lin_vel.detach().clone(),
+                        "base_ang_vel": base_ang_vel.detach().clone(),
                     }
                 )
                 obs_t = _to_torch_obs(next_obs, device)

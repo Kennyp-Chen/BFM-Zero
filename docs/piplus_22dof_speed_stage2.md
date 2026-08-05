@@ -131,7 +131,7 @@ torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 \
   --work-dir /root/autodl-tmp/chenyupeng/HT_BFM/logs/speed_stage2_piplus_22dof/smoke_4gpu_mujoco
 ```
 
-正式向量化训练仍必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时 IsaacLab 用 torchrun 的原始 `LOCAL_RANK=0..3` 选择 0-3 物理 GPU，并分别设置 Omniverse/Isaac cache。不可在 worker 内将 `LOCAL_RANK` 重写为零，否则四个 Kit 实例都会争抢 GPU 0 并出现 `ERROR_DEVICE_LOST`。不要在首四卡预检命令中设置 `CUDA_VISIBLE_DEVICES`，因为 Omniverse Vulkan 与 CUDA 的设备枚举不同，IsaacLab 会对此给出崩溃风险警告。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
+正式向量化训练使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`。当前 H20 驱动上的 Isaac GPU PhysX/Vulkan 路径会触发 `ERROR_DEVICE_LOST`，因此已实现并验证 `--sim-device cpu`：Isaac Sim 仍创建真实向量化环境并执行物理 rollout，PPO command encoder/decoder/NCCL 仍在 `--device cuda` 上运行，动作进入仿真前转 CPU，观测/奖励回传 CUDA。为避免 Kit 启动 GPU Vulkan，运行时设置软件 Vulkan ICD `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`，并传 `--kit_args='--renderer/enabled=pxr --app/vulkan=false'`。多卡时仍保留原始 `LOCAL_RANK=0..3`，每个 rank 的 CUDA policy 和 Isaac cache 独立；不可将 `LOCAL_RANK` 重写为零。
 
 ```bash
 cd /root/autodl-tmp/chenyupeng/HT_BFM
@@ -185,20 +185,18 @@ python -m humanoidverse.speed_stage2_play \
 
 ## 7. 当前阶段与 TODO
 
-当前阶段：**四卡 DDP 链路 smoke 已通过；Isaac Sim 向量化冒烟仍被运行环境阻塞**。
+当前阶段：**四卡 Isaac Sim 向量化 DDP smoke 已通过；正式全量训练后台运行中**。
 
 已完成：22DoF 资产和静态 contract 验证；ONNX decoder 616->22 前向；动态 batch 输出与原始逐条 ONNX 对齐（最大误差 `1.56e-7`）；MuJoCo 单环境一轮 PPO smoke；MuJoCo 四 rank、四 GPU、一次 rollout/一次 PPO update/NCCL 同步 smoke，并写出可加载 checkpoint；数据盘默认输出；错误的 Isaac Sim 四卡预检进程已清理。
 
-未完成：headless Isaac Sim 多环境 smoke 与四卡 DDP preflight。2026-08-05 的受控单卡、1 environment、1 rollout step 测试在环境构建后约 26 秒报 `VkResult: ERROR_DEVICE_LOST`，并生成 NVIDIA Aftermath crash dump。随后显式关闭 Kit renderer multi-GPU 后，只有 GPU 0 标记为 Active，仍在约 19 秒报相同错误。因此问题不属于 DDP rank 映射、四卡显存竞争、Kit renderer multi-GPU 或 PPO 代码。每次 Kit 均不能正常退出，需要 `SIGKILL`，但之后 GPU 0-3 显存已经释放。此前所有 Isaac Sim 尝试均不能视为训练成功。
+已解决：默认 GPU PhysX/Vulkan 路径在 H20 上的 `ERROR_DEVICE_LOST`。单卡 CPU PhysX + 软件 Vulkan 完成 2-env PPO，并写出 `checkpoint_1.pt`；四卡、每卡 2 env 的 Isaac Sim 向量化 DDP smoke 完成一次 PPO update，rank0 写出 `checkpoint_1.pt`，无 `DEVICE_LOST`。当前正式运行使用四卡、每卡 16 env、32 步 rollout、5 个 PPO epoch、10000 iterations，输出目录见实验日志。退出时偶发 Kit cleanup warning 不影响 checkpoint；训练期间无 Vulkan crash。
 
 后续 TODO：
 
-1. 当前容器中官方 Isaac Lab `create_empty.py` 也无法完成 `SimulationContext` 初始化；先由机器维护侧检查或重启该容器的 Isaac Sim/Vulkan GPU 上下文，再运行本表的单卡受控命令。H20 上 `nvidia-smi --gpu-reset` 返回 `Not Supported`，训练进程不能替代宿主重启完成复位。
-2. 单卡命令必须产出 `checkpoint_1.pt` 且无 `ERROR_DEVICE_LOST` 后，才重新运行第 5 节的四卡 `checkpoint_5.pt` preflight，记录每个 rank 的 Isaac 初始化、吞吐、NCCL 和 GPU 内存。
-3. 预检通过后运行短窗口（例如 100-500 iterations），观察 reward、vx/vy/yaw MAE、termination rate、KL 和实际 steps/s。
-4. 定期复制 checkpoint 到本地，使用第 6 节 GUI playback 对 stand、前进、横移和纯 yaw 指令做视觉检查。
-5. 根据吞吐决定是否安装支持 CUDA 的 ONNX Runtime；在此之前保持动态 batch CPU decoder 并记录其成本。
-6. 在速度 tracking 可稳定收敛后，再评估是否需要把 AMP 作为对照实验，而不是混入本实验主线。
+1. 继续监控正式运行的 reward、vx/vy/yaw MAE、termination、KL、steps/s，并确认 `checkpoint_100.pt`、`checkpoint_1000.pt` 等周期性产物。
+2. 定期复制 checkpoint 到本地，使用第 6 节 GUI playback 对 stand、前进、横移和纯 yaw 指令做视觉检查。
+3. 根据 CPU PhysX 吞吐决定是否迁移到已修复驱动的 GPU PhysX，或安装支持 CUDA 的 ONNX Runtime；当前先保持稳定配置。
+4. 在速度 tracking 可稳定收敛后，再评估 AMP 对照实验，不混入本实验主线。
 
 ## 8. 实验日志
 
@@ -233,3 +231,9 @@ Git commit：
 本地 playback 观察：
 结论与下一步：
 ```
+
+## 2026-08-05 13:00-13:02 UTC - Isaac Sim 向量化 DDP smoke 与正式训练
+
+- 单卡 CPU PhysX + 软件 Vulkan (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`) 完成 2-env、1 iteration PPO，写出 `checkpoint_1.pt`，无 `DEVICE_LOST`。
+- 四卡 smoke 使用 `--device cuda --sim-device cpu`，每卡 2 env，四个 rank 均完成 Isaac Sim motion 加载、rollout、PPO 和 NCCL 同步；rank0 写出 `checkpoint_1.pt`。指标：`reward_mean=0.47226`，`vx/vy/yaw MAE=0.30936/0.44813/0.70866`，`termination=0`。
+- 正式后台训练已启动，PID `689988`，输出目录 `logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505`。命令为四卡、每卡 16 env、`rollout_steps=32`、`ppo_epochs=5`、`iterations=10000`、`save_every=100`。启动后已完成 iterations 1-4，`reward_mean=0.632-0.701`，`termination=0`，无 Vulkan 错误。
