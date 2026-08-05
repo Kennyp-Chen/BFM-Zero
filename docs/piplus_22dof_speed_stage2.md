@@ -411,3 +411,17 @@ Git commit：
 - 版本切换有可能规避当前 5.1 RC + H20 Vulkan/PhysX 崩溃，但会引入 IsaacLab API、Python 和资产导入差异；
   不能直接在现有 `HT_BFM` 环境中降级覆盖。应单独建立 Python 3.10 + IsaacLab 2.0.2 + Isaac Sim 4.5
   的隔离环境，先跑官方 Cartpole，再跑 PiPlus no-visual smoke，与当前 5.1 环境做 A/B 对照。
+
+## 2026-08-05 - zhuzejian 提供的 BFM 运行时依赖基线
+
+- 新增未纳入代码提交的 `zhuzejian_BFM_requirements.txt`。该文件描述的是 zhuzejian 当前
+  `env_isaaclab` 运行时，而不是原版 BFM-Zero 的旧依赖：Linux x86_64、Python `3.11`、CUDA `12.8`。
+- 核心版本为 Isaac Sim `5.1.0.0`、IsaacLab `2.3.x` 源码 editable 安装、PyTorch `2.7.0+cu128`；本机
+  `HT_BFM` 环境实测 IsaacLab 包版本为 `0.47.2`（对应 2.3.0 源码）。
+- 其它关键固定版本：MuJoCo `3.8.1`、NumPy `1.26.4`、ONNX `1.20.1`、ONNX Runtime `1.26.0`、
+  `hydra-core 1.3.2`、`safetensors 0.7.0`、`tensordict>=0.8.3`。Isaac Sim 和 PyTorch 分别从 NVIDIA、
+  PyTorch CUDA 12.8 index 安装。
+- 这与当前 HT_BFM 环境的版本组合一致，说明 zhuzejian 的代码基线不是 Isaac Sim 4.5；它可以作为当前
+  5.1/2.3 复现的依赖参考，但不能单独证明 H20 的 `ERROR_DEVICE_LOST` 是代码或依赖版本问题。
+- 文件中的 `IsaacLab` 仍需从 `../IsaacLab2.3/IsaacLab/source/isaaclab[all,isaacsim]` editable 安装，
+  因此迁移到另一台机器时必须同时保留匹配的 IsaacLab 2.3 源码树和 Isaac Sim 5.1.0.0。
