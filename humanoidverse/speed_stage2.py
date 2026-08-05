@@ -42,7 +42,7 @@ DEFAULT_DECODER_PATH = (
 DEFAULT_DECODER_FACTORY = "humanoidverse.piplus_h0w_onnx_decoder:load_decoder"
 DEFAULT_EXPERT_DATASET = PROJECT_ROOT / "humanoidverse/data/piplus_h0w_lafan/piplus_h0w_lafan_10s-clipped.pkl"
 DEFAULT_ROBOT_CONFIG = PROJECT_ROOT / "humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H0W.yaml"
-DEFAULT_WORK_DIR = PROJECT_ROOT / "logs/speed_stage2_piplus_h0w"
+DEFAULT_WORK_DIR = PROJECT_ROOT / "logs/speed_stage2_piplus_22dof"
 
 COMMAND_SCALE = (1.25, 5.0, 1.25)
 DOF_VEL_SCALE = 0.05
@@ -320,6 +320,8 @@ def build_h0w_locomotion_env(
 ):
     if simulator not in {"isaacsim", "mujoco"}:
         raise ValueError(f"Unsupported simulator {simulator!r}")
+    if simulator == "mujoco" and num_envs != 1:
+        raise ValueError("The MuJoCo backend supports only --num-envs 1; use Isaac Sim for vectorized training")
     if not Path(expert_dataset).expanduser().is_file():
         raise FileNotFoundError(f"H0W motion dataset does not exist: {expert_dataset}")
     overrides = [
@@ -519,7 +521,7 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
         optimizer = torch.optim.Adam(policy.parameters(), lr=args.learning_rate)
         work_dir = Path(args.work_dir)
         metadata = {
-            "task": "speed_stage2_piplus_h0w",
+            "task": "speed_stage2_piplus_22dof",
             "reward": "velocity_command_only_plus_optional_environment_reward",
             "amp": False,
             "bfm_model": contract["bfm_model"],

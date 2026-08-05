@@ -612,4 +612,10 @@
 - Context: Local MuJoCo PiPlus_S_12L8A0G2H0W, frozen `FBcprAuxModel.onnx` decoder, 1 environment, 1 rollout step, 1 PPO epoch; no AMP discriminator or 23DoF teacher.
 - Adjustment: Connected the exported 616-input/22-action ONNX policy as the H0W decoder. The command encoder produces a normalized 256D latent; the velocity-command reward remains the only task objective.
 - Result: Environment loaded 869 H0W motions, completed one decoder action and PPO update, saved checkpoint_1.pt. reward_mean=0.2184, termination_rate=0.0. This is an interface smoke test only, not a gait-quality evaluation.
-- Files/commands: `model/piplus_h0w_bfm/decoder/bfmzero-piplus-h0w-isaac-20260629_214205/exported/FBcprAuxModel.onnx`; `python -m humanoidverse.speed_stage2 --simulator mujoco --device cuda:0 --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization --work-dir /tmp/speed_stage2_piplus_h0w_smoke --save-every 1`
+- Files/commands: `model/piplus_h0w_bfm/decoder/bfmzero-piplus-h0w-isaac-20260629_214205/exported/FBcprAuxModel.onnx`; `python -m humanoidverse.speed_stage2 --simulator mujoco --device cuda:0 --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization --work-dir logs/speed_stage2_piplus_22dof/smoke_20260805_1050 --save-every 1`
+
+## 2026-08-05 11:19 UTC - PiPlus 22DoF dynamic ONNX decoder validation
+
+- Adjustment: The frozen ONNX export annotated batch size as one although its graph is batch-safe. The decoder now rewrites only the input/output batch annotations in memory and executes one batched ONNX call per simulator step; the checkpoint file is unchanged.
+- Result: Batch-16 output matches the original per-row export with max absolute error 1.56e-7. CPU decoder latency was 24 ms, 41 ms, and 99 ms for batches 32, 128, and 256. The post-change one-environment MuJoCo PPO smoke completed and saved a checkpoint.
+- Backend constraint: This repository's MuJoCo wrapper supports only one environment. It now fails clearly for a larger value; vectorized and four-GPU training must use headless Isaac Sim. A local two-environment Isaac Sim startup allocated GPU context but did not finish initialization after six minutes, so it was stopped and remains unverified.

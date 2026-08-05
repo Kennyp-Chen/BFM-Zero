@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.nn import functional
 
@@ -13,9 +12,9 @@ from torch.nn import functional
 class OnnxPiPlusH0WDecoder:
     """Run the exported FBcprAux model with raw HumanoidVerse observations.
 
-    The export has a fixed batch dimension of one, so batched simulator input
-    is evaluated row by row. This keeps the adapter correct for smoke tests
-    and small PPO jobs; a dynamic-batch ONNX export is needed for large runs.
+    The supplied export fixes its batch dimension at one even though all of
+    its operations support batching. The adapter changes only the input and
+    output batch annotations in memory, leaving the checkpoint on disk intact.
     """
 
     action_dim = 22
@@ -37,7 +36,18 @@ class OnnxPiPlusH0WDecoder:
         providers = ["CPUExecutionProvider"]
         if device.type == "cuda" and "CUDAExecutionProvider" in available:
             providers.insert(0, "CUDAExecutionProvider")
-        self.session = ort.InferenceSession(str(self.decoder_path), providers=providers)
+        try:
+            import onnx
+        except ImportError as exc:
+            raise RuntimeError("ONNX decoder requires the onnx package to enable batched inference") from exc
+
+        model = onnx.load(str(self.decoder_path))
+        for value_info in (*model.graph.input, *model.graph.output):
+            batch_dim = value_info.type.tensor_type.shape.dim[0]
+            batch_dim.ClearField("dim_value")
+            batch_dim.dim_param = "batch"
+        onnx.checker.check_model(model)
+        self.session = ort.InferenceSession(model.SerializeToString(), providers=providers)
         inputs = self.session.get_inputs()
         outputs = self.session.get_outputs()
         if len(inputs) != 1 or len(outputs) != 1:
@@ -71,11 +81,8 @@ class OnnxPiPlusH0WDecoder:
 
         actor_obs = torch.cat((state, last_action, history_actor, z), dim=-1)
         actor_obs_np = actor_obs.detach().to(device="cpu", dtype=torch.float32).numpy()
-        actions = [
-            self.session.run([self.output_name], {self.input_name: row[None]})[0]
-            for row in actor_obs_np
-        ]
-        return torch.as_tensor(np.concatenate(actions, axis=0), device=z.device, dtype=torch.float32)
+        actions = self.session.run([self.output_name], {self.input_name: actor_obs_np})[0]
+        return torch.as_tensor(actions, device=z.device, dtype=torch.float32)
 
 
 def load_decoder(_bfm_model_path: Path, decoder_path: Path, device: torch.device) -> OnnxPiPlusH0WDecoder:
