@@ -107,7 +107,7 @@ conda activate HT_BFM
 python -m humanoidverse.speed_stage2 --validate-assets
 ```
 
-MuJoCo 只可用于单环境 smoke/playback：
+MuJoCo 每个 rank 只支持一个环境，可用于单环境 smoke/playback：
 
 ```bash
 python -m humanoidverse.speed_stage2 \
@@ -117,7 +117,21 @@ python -m humanoidverse.speed_stage2 \
   --work-dir logs/speed_stage2_piplus_22dof/smoke_manual
 ```
 
-正式向量化训练必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时 IsaacLab 用 torchrun 的原始 `LOCAL_RANK=0..3` 选择 0-3 物理 GPU，并分别设置 Omniverse/Isaac cache。不可在 worker 内将 `LOCAL_RANK` 重写为零，否则四个 Kit 实例都会争抢 GPU 0 并出现 `ERROR_DEVICE_LOST`。不要在首四卡预检命令中设置 `CUDA_VISIBLE_DEVICES`，因为 Omniverse Vulkan 与 CUDA 的设备枚举不同，IsaacLab 会对此给出崩溃风险警告。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
+四卡 DDP 集成 smoke 可在当前机器使用 MuJoCo 完成。它验证四个 GPU 上的 command encoder、frozen decoder、rollout、PPO、NCCL all-reduce 和 rank-0 checkpoint，但不代表 Isaac Sim 的向量化采样吞吐：
+
+```bash
+cd /root/autodl-tmp/chenyupeng/HT_BFM
+conda activate HT_BFM
+
+TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+torchrun --standalone --nproc_per_node=4 -m humanoidverse.speed_stage2 \
+  --simulator mujoco --num-envs 1 --iterations 1 --rollout-steps 1 \
+  --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization \
+  --save-every 1 \
+  --work-dir /root/autodl-tmp/chenyupeng/HT_BFM/logs/speed_stage2_piplus_22dof/smoke_4gpu_mujoco
+```
+
+正式向量化训练仍必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时 IsaacLab 用 torchrun 的原始 `LOCAL_RANK=0..3` 选择 0-3 物理 GPU，并分别设置 Omniverse/Isaac cache。不可在 worker 内将 `LOCAL_RANK` 重写为零，否则四个 Kit 实例都会争抢 GPU 0 并出现 `ERROR_DEVICE_LOST`。不要在首四卡预检命令中设置 `CUDA_VISIBLE_DEVICES`，因为 Omniverse Vulkan 与 CUDA 的设备枚举不同，IsaacLab 会对此给出崩溃风险警告。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
 
 ```bash
 cd /root/autodl-tmp/chenyupeng/HT_BFM
@@ -171,15 +185,15 @@ python -m humanoidverse.speed_stage2_play \
 
 ## 7. 当前阶段与 TODO
 
-当前阶段：**Isaac Sim 冒烟测试被运行环境阻塞**。
+当前阶段：**四卡 DDP 链路 smoke 已通过；Isaac Sim 向量化冒烟仍被运行环境阻塞**。
 
-已完成：22DoF 资产和静态 contract 验证；ONNX decoder 616->22 前向；动态 batch 输出与原始逐条 ONNX 对齐（最大误差 `1.56e-7`）；MuJoCo 单环境一轮 PPO smoke；数据盘默认输出；错误的四卡预检进程已清理。
+已完成：22DoF 资产和静态 contract 验证；ONNX decoder 616->22 前向；动态 batch 输出与原始逐条 ONNX 对齐（最大误差 `1.56e-7`）；MuJoCo 单环境一轮 PPO smoke；MuJoCo 四 rank、四 GPU、一次 rollout/一次 PPO update/NCCL 同步 smoke，并写出可加载 checkpoint；数据盘默认输出；错误的 Isaac Sim 四卡预检进程已清理。
 
 未完成：headless Isaac Sim 多环境 smoke 与四卡 DDP preflight。2026-08-05 的受控单卡、1 environment、1 rollout step 测试在环境构建后约 26 秒报 `VkResult: ERROR_DEVICE_LOST`，并生成 NVIDIA Aftermath crash dump。随后显式关闭 Kit renderer multi-GPU 后，只有 GPU 0 标记为 Active，仍在约 19 秒报相同错误。因此问题不属于 DDP rank 映射、四卡显存竞争、Kit renderer multi-GPU 或 PPO 代码。每次 Kit 均不能正常退出，需要 `SIGKILL`，但之后 GPU 0-3 显存已经释放。此前所有 Isaac Sim 尝试均不能视为训练成功。
 
 后续 TODO：
 
-1. 先由机器维护侧检查或重启该容器的 Isaac Sim/Vulkan GPU 上下文，再运行本表的单卡受控命令。H20 上 `nvidia-smi --gpu-reset` 返回 `Not Supported`，训练进程不能替代宿主重启完成复位。
+1. 当前容器中官方 Isaac Lab `create_empty.py` 也无法完成 `SimulationContext` 初始化；先由机器维护侧检查或重启该容器的 Isaac Sim/Vulkan GPU 上下文，再运行本表的单卡受控命令。H20 上 `nvidia-smi --gpu-reset` 返回 `Not Supported`，训练进程不能替代宿主重启完成复位。
 2. 单卡命令必须产出 `checkpoint_1.pt` 且无 `ERROR_DEVICE_LOST` 后，才重新运行第 5 节的四卡 `checkpoint_5.pt` preflight，记录每个 rank 的 Isaac 初始化、吞吐、NCCL 和 GPU 内存。
 3. 预检通过后运行短窗口（例如 100-500 iterations），观察 reward、vx/vy/yaw MAE、termination rate、KL 和实际 steps/s。
 4. 定期复制 checkpoint 到本地，使用第 6 节 GUI playback 对 stand、前进、横移和纯 yaw 指令做视觉检查。
@@ -201,6 +215,9 @@ python -m humanoidverse.speed_stage2_play \
 | 2026-08-05 | Isaac Sim，四卡 GPU 隔离修复尝试 | 日志显示四个 AppLauncher 都是 `cuda:0`，说明将 `LOCAL_RANK` 重写为 0 反而使四个 Kit 争抢 GPU 0；无 checkpoint，已停止 | 保留原始 `LOCAL_RANK`，移除首四卡命令的 `CUDA_VISIBLE_DEVICES`，待后台重测 |
 | 2026-08-05 12:19 UTC | Isaac Sim，单卡、1 env、1 step 受控 smoke | AppLauncher 正确使用 `cuda:0`，完成环境构建并加载 869 motions；约 26 秒后出现 `VkResult: ERROR_DEVICE_LOST`，生成 `kit_20260805_121935-0.nv-gpudmp`，无 checkpoint；`SIGTERM` 无效，已 `SIGKILL` | 单卡可复现，阻塞在 Isaac Sim/Vulkan 运行环境，禁止继续四卡训练，先修复/重启容器 |
 | 2026-08-05 12:23 UTC | Isaac Sim，单卡 renderer multi-GPU 禁用 smoke | 启动器加入 `renderer/multiGpu/enabled=false`、`autoEnable=false`、`maxGpuCount=1`；Kit 仅标记 GPU 0 Active，但约 19 秒后仍报同一错误，生成 `kit_20260805_122313-0.nv-gpudmp`，无 checkpoint | 启动器已保留该防护；multi-GPU renderer 不是根因，仍须修复 Isaac Sim/Vulkan 环境 |
+| 2026-08-05 12:31 UTC | 官方 Isaac Lab `create_empty.py` | 不加载本仓库资产，无法完成 `SimulationContext` 初始化；手动停止 | 平台问题独立于 PiPlus 场景 |
+| 2026-08-05 12:34 UTC | 官方空场景，仅 NVIDIA ICD + XDG runtime + reset user | 同样无法完成 `SimulationContext` 初始化；手动停止 | ICD、runtime 和 Kit 用户配置不是根因 |
+| 2026-08-05 12:36 UTC | MuJoCo，4 rank x 1 env、1 iter、1 rollout step、1 PPO epoch | 4 个 rank 分别在 `cuda:0..3` 载入 motion；NCCL 同步完成，`reward_mean=0.47984`，`termination_rate=0`，写出并验证 `checkpoint_1.pt` | 四卡 command encoder/decoder/PPO/DDP 链路通过；仅可作集成 smoke，非 Isaac Sim 向量化训练 |
 
 后续记录模板：
 
