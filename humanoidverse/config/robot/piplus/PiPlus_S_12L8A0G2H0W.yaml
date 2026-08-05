@@ -244,10 +244,10 @@ robot:
     density: 0.001
     angular_damping: 0.
     linear_damping: 0.
-    asset_root: "package://ht_urdf/PiPlus_S_12L8A0G2H0W"
+    asset_root: "humanoidverse/data/robots/piplus_h0w"
     urdf_file: "urdf/PiPlus_S_12L8A0G2H0W.urdf"
     usd_file: null
-    xml_file: "xml/PiPlus_S_12L8A0G2H0W_with_armature.xml"
+    xml_file: "xml/piplus_h0w_bfm.xml"
     robot_type: PiPlus_S_12L8A0G2H0W
     self_collisions: 0
     default_dof_drive_mode: 3
@@ -256,8 +256,8 @@ robot:
   motion:
     motion_file: 'data/lafan_tail.pkl'
     asset:
-      assetRoot: "package://ht_urdf/PiPlus_S_12L8A0G2H0W"
-      assetFileName: "xml/PiPlus_S_12L8A0G2H0W.xml"
+      assetRoot: "humanoidverse/data/robots/piplus_h0w"
+      assetFileName: "xml/piplus_h0w_bfm.xml"
       urdfFileName: "urdf/PiPlus_S_12L8A0G2H0W.urdf"
     humanoid_type: PiPlus_S_12L8A0G2H0W
     bias_offset: False
