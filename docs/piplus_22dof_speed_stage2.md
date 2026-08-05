@@ -98,6 +98,54 @@ reward       = exp(-linear_error / 0.16) + 0.5 * exp(-yaw_error / 0.25)
 
 默认 PPO：`rollout_steps=32`、`ppo_epochs=5`、`learning_rate=3e-4`、`discount=0.98`、`gae_lambda=0.95`、`clip_ratio=0.2`、`value_coef=0.5`、`entropy_coef=0.001`。
 
+### 4.1 奖励、GAE 与 PPO 损失（ASCII 公式版）
+
+本节刻意使用纯文本公式，避免 Markdown/MathJax 环境不可用时公式显示为空。令实际基座速度为
+`v = [vx, vy]`、实际偏航角速度为 `wz`，速度指令为 `c = [cx, cy, cwz]`。
+
+```text
+linear_error_t = (vx_t - cx_t)^2 + (vy_t - cy_t)^2
+yaw_error_t    = (wz_t - cwz_t)^2
+
+r_linear_t = exp(-linear_error_t / 0.16)
+r_yaw_t    = exp(-yaw_error_t / 0.25)
+r_t        = r_linear_t + 0.5 * r_yaw_t
+```
+
+因此 `r_t` 的最大值为 `1.5`，且仅在 `[vx, vy, wz] == [cx, cy, cwz]` 时达到。两个分母是误差尺度：
+线速度平方误差增加 `0.16` 时，其对应项缩小到 `exp(-1)`；偏航平方误差增加 `0.25` 时同理。
+当前正式命令没有传 `--env-reward-weight`，其默认值为 `0.0`，所以实际优化的即时奖励就是上式，
+没有 AMP、teacher、expert motion 或环境原生奖励项。
+
+GAE 与 return：
+
+```text
+delta_t = r_t + gamma * V(s_{t+1}) * not_done_t - V(s_t)
+A_t     = delta_t + gamma * lambda * not_done_t * A_{t+1}
+R_t     = A_t + V(s_t)
+
+gamma  = 0.98
+lambda = 0.95
+```
+
+对存入 rollout 的 raw latent `z_t`，PPO 使用：
+
+```text
+ratio_t = exp(log_pi_new(z_t | s_t) - log_pi_old(z_t | s_t))
+
+L_policy = -mean(min(ratio_t * A_t,
+                     clip(ratio_t, 0.8, 1.2) * A_t))
+
+L_value  = 0.5 * mean((V(s_t) - R_t)^2)
+L_total  = L_policy + 0.5 * L_value - 0.001 * mean(entropy(pi_new))
+```
+
+训练首先对 `A_t` 做零均值、单位方差归一化。`L_policy` 的 clip 把一次 update 的重要性比率限制在
+`[0.8, 1.2]`；`L_value` 让 critic 预测 GAE return；熵项避免 256D latent 高斯策略过早退化。
+优化器对 command encoder、latent log-std、value head 求梯度；decoder 处于 `eval()` 且
+`requires_grad_(False)`，不会接收或更新梯度。源码分别见 `speed_tracking_reward()`、`compute_gae()`、
+`ppo_update()`：`humanoidverse/speed_stage2.py:270`、`:364`、`:386`。
+
 ## 5. 运行前检查与命令
 
 在仓库根目录、`HT_BFM` Conda 环境中执行：
@@ -211,6 +259,45 @@ tensorboard --logdir "$RUN_DIR/tensorboard" --host 0.0.0.0 --port 6006
 3. 根据 CPU PhysX 吞吐决定是否迁移到已修复驱动的 GPU PhysX，或安装支持 CUDA 的 ONNX Runtime；当前先保持稳定配置。
 4. 在速度 tracking 可稳定收敛后，再评估 AMP 对照实验，不混入本实验主线。
 
+### 7.1 Isaac Sim GPU PhysX/Vulkan 平台问题
+
+当前正式 run 不会再触发 `ERROR_DEVICE_LOST`，因为它使用 CPU PhysX + llvmpipe 软件 Vulkan；但这不是
+GPU PhysX 性能配置，采样吞吐会明显低于原生 GPU PhysX。PPO policy/value、NCCL all-reduce 仍在 GPU，
+但 PhysX 和 ONNX decoder 都不在 GPU：本环境 `onnxruntime==1.26.0` 只有 CPU provider。
+
+截至 2026-08-05 的主机诊断：
+
+```text
+GPU:              NVIDIA H20 x8
+driver:           590.48.01
+Isaac Sim package: 5.1.0.0
+Isaac Sim core:    5.1.0-rc.19+release.26219.9c81211b
+native Vulkan:     vulkaninfo 能枚举全部 H20，NVIDIA proprietary driver 590.48.01
+RT capability:      可见 VK_KHR_acceleration_structure 与 VK_KHR_ray_tracing_pipeline
+native test:       官方 Isaac Lab 空 SimulationContext 和本项目单卡场景均复现 ERROR_DEVICE_LOST
+CPU fallback:      4 rank x 16 env 的 Isaac Sim rollout/PPO/NCCL 持续运行，无 DEVICE_LOST
+```
+
+这说明问题不由 PiPlus 资产、22DoF decoder、奖励、PPO 或 DDP 引起，而位于 Isaac Sim RC build、H20 driver、
+Vulkan/RTX 或无头 Kit 组合。BFM-Zero 官方仓库已有同类报告：
+`LeCAR-Lab/BFM-Zero#13, "got errors while training on h20"`，其环境是 H20、driver 570.158.01、
+CUDA 12.8，报错为 GPU device 创建失败。该 issue 已关闭但没有维护者修复结论。
+
+Isaac Sim 官方也记录了容器 headless Vulkan `ERROR_DEVICE_LOST`（IsaacSim#431）；维护者要求提供完整 Kit log、
+命令和 `nvidia-smi` 以进一步定位。该讨论中的用户通过 `vulkan=false` 规避崩溃，但 NVIDIA 维护者明确指出
+Linux 上 Vulkan 是 Isaac Sim 唯一图形后端，因此它是 workaround，不是 GPU PhysX 修复。
+
+处理顺序（不得在当前 run 中途切换）：
+
+1. 保持当前 CPU fallback run 完成或到达选定 checkpoint，不能热切换 `sim_device`，因为物理后端状态不兼容。
+2. 在独立环境安装正式、非 RC 的 Isaac Sim build，并将 NVIDIA driver 对齐该发行版官方要求；当前最新官方要求页列出 Linux driver `595.58.03`，本机为 `590.48.01`。必须同时核验所选 Isaac Sim 5.1 build 的发行说明，不能仅因当前网页指向更高版本而盲目混装。
+3. 在不运行训练时，先用官方 Isaac Lab `create_empty.py` 在单张 H20 上做原生 Vulkan smoke，再以本入口
+   `--sim-device cuda:0` 做 1 env/1 iteration smoke；二者均成功、无 GPU dump 后再做 4 rank 向量化 smoke。
+4. 仅在上述 smoke 通过后，启动新的 GPU PhysX run；它与当前 CPU fallback run 是不同实验，不能从当前 checkpoint
+   声称等价续训。届时再安装 CUDA-enabled ONNX Runtime，使 decoder inference 也留在每个 rank 的 GPU。
+
+不要用降低 `num_envs`、改奖励权重或修改 PPO loss 来处理该错误，它们无法修复 Vulkan device loss。
+
 ## 8. 实验日志
 
 | 时间 (UTC) | 改动/配置 | 命令与结果 | 结论 |
@@ -250,3 +337,18 @@ Git commit：
 - 单卡 CPU PhysX + 软件 Vulkan (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`) 完成 2-env、1 iteration PPO，写出 `checkpoint_1.pt`，无 `DEVICE_LOST`。
 - 四卡 smoke 使用 `--device cuda --sim-device cpu`，每卡 2 env，四个 rank 均完成 Isaac Sim motion 加载、rollout、PPO 和 NCCL 同步；rank0 写出 `checkpoint_1.pt`。指标：`reward_mean=0.47226`，`vx/vy/yaw MAE=0.30936/0.44813/0.70866`，`termination=0`。
 - 正式后台训练已启动，PID `689988`，输出目录 `logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505`。命令为四卡、每卡 16 env、`rollout_steps=32`、`ppo_epochs=5`、`iterations=10000`、`save_every=100`。已完成 `checkpoint_100.pt` 并继续运行到 iteration 102；iteration 100 的 `reward_mean=0.9888`、`vx/vy/yaw MAE=0.1479/0.1532/0.3750`、`termination=0`，无 Vulkan 错误。
+
+## 2026-08-05 14:38 UTC - H20 ERROR_DEVICE_LOST 根因复核
+
+- 正式 CPU fallback run 仍健康，已超过 iteration 1435，已写出 `checkpoint_1400.pt`；最近一组采样指标为
+  `reward_mean=1.3252`、`vx/vy/yaw MAE=0.1127/0.0526/0.1301`、`termination_rate=0`。当前未出现新的
+  Vulkan crash。
+- GPU 0--3 功率约 114--122 W、显存约 1.9 GiB、瞬时 util 为 0%；这是 CPU PhysX、CPU ONNX decoder 和很小的
+  PPO 网络共同导致，并非训练进程停滞。约每 100 iteration 需要 6 分 45 秒，即约 4.05 秒/iteration。
+- 版本与平台检查：`isaacsim` package `5.1.0.0`，内核 build `5.1.0-rc.19`，driver `590.48.01`；`vulkaninfo`
+  可枚举所有 H20 且报告 `VK_KHR_acceleration_structure`、`VK_KHR_ray_tracing_pipeline`，没有温度、ECC、
+  retired-page 或硬件 slowdown 迹象。因此“无 RT 硬件能力”不是原因；此前 native GPU Vulkan 在官方空场景和项目
+  场景均重现 device loss，暂定为 Isaac Sim RC build、driver 与无头 Vulkan 组合的兼容性问题，不修改当前训练代码或超参数。
+- 联网核查：BFM-Zero#13 为同类 H20 GPU 创建失败报告；IsaacSim#431 为 5.1.0 container headless
+  `ERROR_DEVICE_LOST`，官方要求完整 Kit log/命令/`nvidia-smi` 继续调查，未给出通用代码修复。详细结论和后续
+  验证顺序已记录在第 7.1 节。
