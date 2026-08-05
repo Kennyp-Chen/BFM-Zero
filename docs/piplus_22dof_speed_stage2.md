@@ -400,3 +400,14 @@ Git commit：
 - GPU 0-3 当前无计算进程、显存仅约 4 MiB；GPU 4-7 正由其他 UFO 训练进程使用，禁止重置或重启这些卡。
 - 下一步必须从 AutoDL 控制面板重启当前容器/实例后再做 GPU smoke；若容器重启后仍复现，需要平台管理员重启
   宿主机驱动或更换 Isaac Sim/driver 组合。仅重新运行 Python 命令不会清除当前 CUDA bad state。
+
+## 2026-08-05 - 原版 BFM-Zero 版本基线
+
+- 原版 `LeCAR-Lab/BFM-Zero` 的 `pyproject.toml` 固定：Python `3.10.*`、`isaaclab[all,isaacsim]==2.0.2`、
+  `isaacsim[all,extscache]==4.5.0`；README 只要求 Linux Isaac Sim 或 MuJoCo，没有声明 H20 专用版本。
+- 当前 HT_BFM 实际环境为 Python 3.11、PyTorch 2.7.0+cu128、Isaac Sim `5.1.0-rc.19`、IsaacLab 2.3.0
+  （安装包内部版本 `0.47.2`）。IsaacLab v2.3 官方兼容表允许 Isaac Sim 4.5/5.0/5.1，因此当前组合在
+  版本表上可用，但不是原版 BFM-Zero 的基线组合。
+- 版本切换有可能规避当前 5.1 RC + H20 Vulkan/PhysX 崩溃，但会引入 IsaacLab API、Python 和资产导入差异；
+  不能直接在现有 `HT_BFM` 环境中降级覆盖。应单独建立 Python 3.10 + IsaacLab 2.0.2 + Isaac Sim 4.5
+  的隔离环境，先跑官方 Cartpole，再跑 PiPlus no-visual smoke，与当前 5.1 环境做 A/B 对照。
