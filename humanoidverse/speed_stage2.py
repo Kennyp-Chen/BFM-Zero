@@ -466,26 +466,46 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _distributed_context(args: argparse.Namespace) -> tuple[argparse.Namespace, int, int]:
+def _distributed_context(args: argparse.Namespace) -> tuple[argparse.Namespace, int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size <= 1:
-        return args, rank, world_size
-    local_rank = int(os.environ["LOCAL_RANK"])
+        return args, rank, local_rank, world_size
+
+    visible_devices = [value.strip() for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if value.strip()]
+    isolate_worker_gpu = os.environ.get("HT_BFM_ISOLATE_WORKER_GPU", "1") != "0"
+    if isolate_worker_gpu and len(visible_devices) > 1:
+        if local_rank >= len(visible_devices):
+            raise RuntimeError(f"LOCAL_RANK={local_rank} cannot select from CUDA_VISIBLE_DEVICES={visible_devices}")
+        # Isaac Kit creates Vulkan contexts for every visible device. Each
+        # torchrun worker must see only its own physical GPU.
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices[local_rank]
+        os.environ["LOCAL_RANK"] = "0"
+        device_rank = 0
+    else:
+        device_rank = local_rank
     if not torch.cuda.is_available():
         raise RuntimeError("Distributed Stage2 training requires CUDA")
-    torch.cuda.set_device(local_rank)
+    torch.cuda.set_device(device_rank)
     if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(backend="nccl", init_method="env://")
-    args.device = f"cuda:{local_rank}"
+        from datetime import timedelta
+
+        torch.distributed.init_process_group(backend="nccl", init_method="env://", timeout=timedelta(hours=2))
+    args.device = f"cuda:{device_rank}"
     args.seed += rank
-    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
-    return args, rank, world_size
+    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(device_rank)
+    if isolate_worker_gpu:
+        rank_cache = Path(os.environ.get("XDG_CACHE_HOME", str(PROJECT_ROOT / ".cache"))) / f"isaac_worker_{rank}"
+        rank_cache.mkdir(parents=True, exist_ok=True)
+        os.environ["OV_DATA_PATH"] = str(rank_cache / "ov_data")
+        os.environ["OMNI_USER_DIR"] = str(rank_cache / "omni_user")
+    return args, rank, local_rank, world_size
 
 
 def main(parsed_args: argparse.Namespace | None = None) -> None:
     args = _parse_args() if parsed_args is None else parsed_args
-    args, rank, world_size = _distributed_context(args)
+    args, rank, _local_rank, world_size = _distributed_context(args)
     contract = validate_h0w_assets(args.robot_config, args.bfm_model)
     if args.validate_assets:
         print(json.dumps(contract, indent=2, sort_keys=True), flush=True)

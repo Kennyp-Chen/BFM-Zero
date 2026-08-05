@@ -117,7 +117,7 @@ python -m humanoidverse.speed_stage2 \
   --work-dir logs/speed_stage2_piplus_22dof/smoke_manual
 ```
 
-正式向量化训练必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时 IsaacLab 会用 worker-local GPU 模式。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
+正式向量化训练必须使用 Isaac Sim。服务器为无头环境：配置会强制 `headless=True`；多卡时入口会将每个 worker 的 `CUDA_VISIBLE_DEVICES` 收窄为单张物理 GPU，并分别设置 Omniverse/Isaac cache。该隔离是必要的：若四个 Kit 进程同时看见 0-3 四张卡，会创建跨卡 Vulkan context 并出现 `ERROR_DEVICE_LOST`。先用固定绝对输出路径做四卡预检，避免未定义 shell 变量导致空 `--work-dir`：
 
 ```bash
 cd /root/autodl-tmp/chenyupeng/HT_BFM
@@ -196,7 +196,8 @@ python -m humanoidverse.speed_stage2_play \
 | 2026-08-05 11:09 | MuJoCo，2 env | IMU tensor shape 错误 | 确认 MuJoCo wrapper 只支持 1 env，已在入口显式拒绝 |
 | 2026-08-05 11:19 | MuJoCo，1 env，dynamic decoder | PPO smoke 再次成功 | 改造后单环境链路通过 |
 | 2026-08-05 | Isaac Sim，2 env headless | 初始化超过 6 分钟，无训练输出，手动停止 | Isaac 多环境未验证 |
-| 2026-08-05 | Isaac Sim，四卡 preflight | `RUN_DIR` 为空，四个 worker 没有实际输出路径且成为孤儿；已停止 | 命令无效，需用本文件的绝对路径版本重试 |
+| 2026-08-05 | Isaac Sim，四卡 preflight | 首次命令 `RUN_DIR` 为空，四个 worker 没有实际输出路径且成为孤儿；已停止 | 命令无效，需用本文件的绝对路径版本重试 |
+| 2026-08-05 | Isaac Sim，四卡 preflight | 修正输出路径后，四个 Kit worker 都可见 GPU 0-3，启动时报告 Vulkan `ERROR_DEVICE_LOST`；无 checkpoint，已停止 | 根因为 worker 未隔离可见 GPU；已迁移 AMP 的 per-worker `CUDA_VISIBLE_DEVICES` 与 cache 隔离，待后台重测 |
 
 后续记录模板：
 
