@@ -42,6 +42,7 @@ DEFAULT_DECODER_PATH = (
 DEFAULT_DECODER_FACTORY = "humanoidverse.piplus_h0w_onnx_decoder:load_decoder"
 DEFAULT_EXPERT_DATASET = PROJECT_ROOT / "humanoidverse/data/piplus_h0w_lafan/piplus_h0w_lafan_10s-clipped.pkl"
 DEFAULT_ROBOT_CONFIG = PROJECT_ROOT / "humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H0W.yaml"
+DEFAULT_WORK_DIR = PROJECT_ROOT / "logs/speed_stage2_piplus_h0w"
 
 COMMAND_SCALE = (1.25, 5.0, 1.25)
 DOF_VEL_SCALE = 0.05
@@ -440,7 +441,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--validate-assets", action="store_true", help="Validate local H0W asset and BFM state-dict contracts then exit.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--simulator", choices=("isaacsim", "mujoco"), default="isaacsim")
-    parser.add_argument("--work-dir", default="runs/speed_stage2_piplus_h0w")
+    parser.add_argument("--work-dir", default=str(DEFAULT_WORK_DIR))
     parser.add_argument("--resume", default=None)
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=10000)
