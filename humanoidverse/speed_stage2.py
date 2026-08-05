@@ -5,12 +5,10 @@ no AMP discriminator, expert-style reward, or 23DoF teacher dependency.  The
 only trainable network is a stochastic command encoder with a PPO value head.
 It produces BFM latents consumed by a frozen decoder.
 
-The supplied H0W artifact is a bare ``model.safetensors`` state dict.  It
-cannot be reconstructed without its matching decoder configuration, so this
-module accepts a small decoder factory protocol.  The factory must return an
-object exposing ``action_dim``, ``project_z(z)``, and
-``act(observation, z, mean=True)``.  ``--validate-assets`` verifies every
-local contract without requiring that decoder.
+The GCR ``model.safetensors`` artifact is used only to validate the H0W robot
+contract. The actual frozen decoder is the matching exported ONNX policy.
+Decoder factories receive both paths and return an object exposing
+``action_dim``, ``project_z(z)``, and ``act(observation, z, mean=True)``.
 """
 
 from __future__ import annotations
@@ -37,6 +35,11 @@ from humanoidverse.utils.asset_paths import resolve_asset_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BFM_MODEL = PROJECT_ROOT / "model/piplus_h0w_bfm/model.safetensors"
+DEFAULT_DECODER_PATH = (
+    PROJECT_ROOT
+    / "model/piplus_h0w_bfm/decoder/bfmzero-piplus-h0w-isaac-20260629_214205/exported/FBcprAuxModel.onnx"
+)
+DEFAULT_DECODER_FACTORY = "humanoidverse.piplus_h0w_onnx_decoder:load_decoder"
 DEFAULT_EXPERT_DATASET = PROJECT_ROOT / "humanoidverse/data/piplus_h0w_lafan/piplus_h0w_lafan_10s-clipped.pkl"
 DEFAULT_ROBOT_CONFIG = PROJECT_ROOT / "humanoidverse/config/robot/piplus/PiPlus_S_12L8A0G2H0W.yaml"
 
@@ -180,7 +183,7 @@ def validate_h0w_assets(robot_config: str | Path, bfm_model: str | Path) -> dict
     }
 
 
-def _resolve_decoder_factory(spec: str) -> Callable[[Path, torch.device], Any]:
+def _resolve_decoder_factory(spec: str) -> Callable[[Path, Path, torch.device], Any]:
     module_name, separator, attribute = spec.partition(":")
     if not separator or not module_name or not attribute:
         raise ValueError("--decoder-factory must use the form package.module:callable")
@@ -197,13 +200,10 @@ def _decoder_z_dim(decoder: Any) -> int:
     raise AttributeError("Decoder must expose z_dim or cfg.archi.z_dim")
 
 
-def _load_decoder(model_path: Path, factory_spec: str | None, device: torch.device) -> Any:
-    if factory_spec is None:
-        raise RuntimeError(
-            "The H0W BFM artifact is a bare model.safetensors file. Supply its matching decoder through "
-            "--decoder-factory package.module:callable. Run --validate-assets before the decoder is available."
-        )
-    decoder = _resolve_decoder_factory(factory_spec)(model_path, device)
+def _load_decoder(model_path: Path, decoder_path: Path, factory_spec: str, device: torch.device) -> Any:
+    if not decoder_path.is_file():
+        raise FileNotFoundError(f"Frozen decoder does not exist: {decoder_path}")
+    decoder = _resolve_decoder_factory(factory_spec)(model_path, decoder_path, device)
     try:
         action_dim = int(decoder.action_dim)
         project_z = decoder.project_z
@@ -429,7 +429,12 @@ def ppo_update(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bfm-model", default=str(DEFAULT_BFM_MODEL), help="Local H0W model.safetensors path.")
-    parser.add_argument("--decoder-factory", default=None, help="package.module:callable that rebuilds and loads the frozen decoder.")
+    parser.add_argument("--decoder-path", default=str(DEFAULT_DECODER_PATH), help="Frozen 22DoF ONNX decoder path.")
+    parser.add_argument(
+        "--decoder-factory",
+        default=DEFAULT_DECODER_FACTORY,
+        help="package.module:callable receiving (bfm_model_path, decoder_path, device).",
+    )
     parser.add_argument("--robot-config", default=str(DEFAULT_ROBOT_CONFIG))
     parser.add_argument("--expert-dataset", default=str(DEFAULT_EXPERT_DATASET))
     parser.add_argument("--validate-assets", action="store_true", help="Validate local H0W asset and BFM state-dict contracts then exit.")
@@ -490,7 +495,8 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
         raise ValueError("--command-resample-prob must be in [0, 1]")
 
     device = torch.device(args.device)
-    decoder = _load_decoder(Path(args.bfm_model).expanduser().absolute(), args.decoder_factory, device)
+    decoder_path = Path(args.decoder_path).expanduser().absolute()
+    decoder = _load_decoder(Path(args.bfm_model).expanduser().absolute(), decoder_path, args.decoder_factory, device)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     env = build_h0w_locomotion_env(
@@ -516,6 +522,7 @@ def main(parsed_args: argparse.Namespace | None = None) -> None:
             "reward": "velocity_command_only_plus_optional_environment_reward",
             "amp": False,
             "bfm_model": contract["bfm_model"],
+            "decoder_path": str(decoder_path),
             "decoder_factory": args.decoder_factory,
             "robot_contract": contract,
             "z_dim": policy.z_dim,

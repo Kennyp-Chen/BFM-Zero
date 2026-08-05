@@ -206,6 +206,8 @@ build/
 .vscode/
 rosbags
 models
+model/piplus_h0w_bfm/
+zero-piplus-h0w-isaac-20260629_214205-22.zip
 instinct-venv
 results/
 data_process/dataset

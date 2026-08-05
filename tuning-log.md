@@ -606,3 +606,10 @@
 - Follow-up result through checkpoint_21700: the 21586-21685 window has lower latent MMD (0.2822 vs 0.2969) and better yaw MAE (0.2508 vs 0.2704), but vx MAE worsened (0.1937 vs 0.1826), planar MAE worsened (0.2711 vs 0.2604), and vx response slope fell (0.4495 vs 0.4737). Overall classification remains mixed/stable, not a sustained locomotion improvement.
 
 - Latest result through checkpoint_22200: speed tracking recovered in the 22086-22200 window (vx MAE 0.1639, planar MAE 0.2332, vx slope 0.6436 versus 0.178/0.236/0.4717 before the resume), while yaw remained weaker (yaw MAE 0.2622, yaw slope 0.8372 versus 0.241/0.9359). Termination stayed zero, but value loss rose to 2.38, so classify as partial speed improvement with critic-health risk, not an across-the-board improvement.
+
+## 2026-08-05 10:50 UTC - PiPlus H0W ONNX speed-stage2 smoke test
+
+- Context: Local MuJoCo PiPlus_S_12L8A0G2H0W, frozen `FBcprAuxModel.onnx` decoder, 1 environment, 1 rollout step, 1 PPO epoch; no AMP discriminator or 23DoF teacher.
+- Adjustment: Connected the exported 616-input/22-action ONNX policy as the H0W decoder. The command encoder produces a normalized 256D latent; the velocity-command reward remains the only task objective.
+- Result: Environment loaded 869 H0W motions, completed one decoder action and PPO update, saved checkpoint_1.pt. reward_mean=0.2184, termination_rate=0.0. This is an interface smoke test only, not a gait-quality evaluation.
+- Files/commands: `model/piplus_h0w_bfm/decoder/bfmzero-piplus-h0w-isaac-20260629_214205/exported/FBcprAuxModel.onnx`; `python -m humanoidverse.speed_stage2 --simulator mujoco --device cuda:0 --num-envs 1 --iterations 1 --rollout-steps 1 --ppo-epochs 1 --minibatch-size 1 --disable-domain-randomization --work-dir /tmp/speed_stage2_piplus_h0w_smoke --save-every 1`
