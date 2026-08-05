@@ -183,6 +183,19 @@ python -m humanoidverse.speed_stage2_play \
 
 关闭 MuJoCo 窗口即可退出。可用 `--max-steps 1000` 自动结束，或把 `--fixed-command` 改为任意契约范围内的 `[vx, vy, wz]`。当前 playback 是固定指令版，不含手柄输入、Isaac Sim viewer 或 MP4 导出；这些是后续功能，不应通过 AMP playback 脚本替代。
 
+## 6.1 TensorBoard 曲线
+
+`speed_stage2` 原生输出 JSONL，不直接创建 TensorBoard event。当前 run 已启动日志转换器和 TensorBoard 服务：
+
+```bash
+RUN_DIR=/root/autodl-tmp/chenyupeng/HT_BFM/logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505
+python tools/speed_stage2_log_to_tensorboard.py "$RUN_DIR/torchrun.log" \
+  --out "$RUN_DIR/tensorboard" --follow
+tensorboard --logdir "$RUN_DIR/tensorboard" --host 0.0.0.0 --port 6006
+```
+
+无头服务器上从本地执行 `ssh -L 6006:127.0.0.1:6006 <server>`，然后打开 `http://127.0.0.1:6006`。曲线包括 `reward_mean`、`speed/vx_mae`、`speed/vy_mae`、`speed/yaw_rate_mae`、`termination_rate`、`approx_kl`、`value_loss`、`policy_loss` 和 `entropy`。
+
 ## 7. 当前阶段与 TODO
 
 当前阶段：**四卡 Isaac Sim 向量化 DDP smoke 已通过；正式全量训练后台运行中**。
