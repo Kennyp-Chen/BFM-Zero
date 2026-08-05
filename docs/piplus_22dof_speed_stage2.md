@@ -392,3 +392,11 @@ Git commit：
   `Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA H20`；执行 `nvidia-smi --gpu-reset -i 0` 返回
   `Insufficient Permissions`。需要管理员执行 GPU reset 或重启容器/节点后，才能进行下一次原生 GPU smoke。
 - 当前不再启动 GPU PhysX 训练；CPU PhysX + software Vulkan 的 checkpoint `1400` 保留为可恢复实验结果。
+
+## 2026-08-05 - GPU reset 能力确认
+
+- 用户执行 `sudo nvidia-smi --gpu-reset -i 0,1,2,3`，四张 H20 均返回 `Not Supported`。这不是 sudo 权限问题，
+  而是当前容器的 H20 passthrough/虚拟化模式不提供 GPU reset 接口。
+- GPU 0-3 当前无计算进程、显存仅约 4 MiB；GPU 4-7 正由其他 UFO 训练进程使用，禁止重置或重启这些卡。
+- 下一步必须从 AutoDL 控制面板重启当前容器/实例后再做 GPU smoke；若容器重启后仍复现，需要平台管理员重启
+  宿主机驱动或更换 Isaac Sim/driver 组合。仅重新运行 Python 命令不会清除当前 CUDA bad state。
