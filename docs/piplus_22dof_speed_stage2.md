@@ -236,4 +236,4 @@ Git commit：
 
 - 单卡 CPU PhysX + 软件 Vulkan (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`) 完成 2-env、1 iteration PPO，写出 `checkpoint_1.pt`，无 `DEVICE_LOST`。
 - 四卡 smoke 使用 `--device cuda --sim-device cpu`，每卡 2 env，四个 rank 均完成 Isaac Sim motion 加载、rollout、PPO 和 NCCL 同步；rank0 写出 `checkpoint_1.pt`。指标：`reward_mean=0.47226`，`vx/vy/yaw MAE=0.30936/0.44813/0.70866`，`termination=0`。
-- 正式后台训练已启动，PID `689988`，输出目录 `logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505`。命令为四卡、每卡 16 env、`rollout_steps=32`、`ppo_epochs=5`、`iterations=10000`、`save_every=100`。启动后已完成 iterations 1-4，`reward_mean=0.632-0.701`，`termination=0`，无 Vulkan 错误。
+- 正式后台训练已启动，PID `689988`，输出目录 `logs/speed_stage2_piplus_22dof/full_4gpu_isaac_cpu_lvp_20260805_1505`。命令为四卡、每卡 16 env、`rollout_steps=32`、`ppo_epochs=5`、`iterations=10000`、`save_every=100`。已完成 `checkpoint_100.pt` 并继续运行到 iteration 102；iteration 100 的 `reward_mean=0.9888`、`vx/vy/yaw MAE=0.1479/0.1532/0.3750`、`termination=0`，无 Vulkan 错误。
